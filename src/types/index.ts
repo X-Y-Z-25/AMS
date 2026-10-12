@@ -104,7 +104,11 @@ export type DisposalMethod =
   | "Scrap"
   | "Vendor Buyback";
 
-export type AssignmentStatus = "Active" | "Returned" | "Transferred";
+export type AssignmentStatus =
+  | "Active"
+  | "Returned"
+  | "Transferred"
+  | "Under Repair";
 
 export type TransferStatus = "Completed" | "Pending";
 
@@ -180,6 +184,7 @@ export interface Employee {
   department: Department;
   designation: string;
   location: Location;
+  locationLabel?: string;
   joiningDate: string;
   status: EmployeeStatus;
   avatarColor: string;
@@ -224,6 +229,7 @@ export interface Asset {
   model: string;
   serialNumber: string;
   serviceTag: string;
+  lastModifiedBy?: string;
   status: AssetStatus;
   condition: AssetCondition;
   // Purchase
@@ -237,8 +243,10 @@ export interface Asset {
   warrantyStart: string;
   warrantyEnd: string;
   warrantyStatus: WarrantyStatus;
+  warrantyCheckedAt?: string;
   // Location
   location: Location;
+  locationLabel?: string;
   building: string;
   floor: string;
   room: string;
@@ -247,6 +255,7 @@ export interface Asset {
   /** Raw Supabase UUID stored in assets.assigned_to – for internal matching */
   assignedToEmployeeUuid?: string;
   assignedToEmployeeName?: string;
+  assignedToEmployeeEmail?: string;
   assignedDate?: string;
   // Stock
   receivedDate: string;
@@ -299,7 +308,9 @@ export interface Assignment {
 
 export interface Transfer {
   id: string;
+  serialNumber: string;
   assetId: string;
+  assetTag?: string;
   assetName: string;
   fromEmployeeId: string;
   fromEmployeeName: string;
@@ -310,6 +321,8 @@ export interface Transfer {
   transferDate: string;
   reason: string;
   status: TransferStatus;
+  currentEmployeeUuid?: string;
+  canReturnToStock?: boolean;
 }
 
 export interface ReturnRecord {

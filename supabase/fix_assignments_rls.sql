@@ -2,7 +2,7 @@ alter table public.assignments enable row level security;
 
 grant select, insert, update, delete
 on table public.assignments
-to anon, authenticated;
+to authenticated;
 
 drop policy if exists "assignments_allow_all_for_dev"
 on public.assignments;
@@ -10,7 +10,7 @@ on public.assignments;
 create policy "assignments_allow_all_for_dev"
 on public.assignments
 for all
-to anon, authenticated
+to authenticated
 using (true)
 with check (true);
 

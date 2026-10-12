@@ -1,15 +1,12 @@
 import { useState, useEffect } from "react";
 import {
   Laptop,
-  Building,
   ShoppingCart,
   Shield,
   MapPin,
   User,
   Edit,
   UserCheck,
-  ArrowLeftRight,
-  Undo2,
   Wrench,
   Trash2,
   History,
@@ -245,26 +242,6 @@ export function AssetDetailsDrawer({
             </Button>
           ) : null}
           {asset.status === "Assigned" && (
-            <>
-              <Button
-                variant="outline"
-                size="sm"
-                icon={<ArrowLeftRight className="h-4 w-4" />}
-                onClick={() => onAction("transfer", asset.id)}
-              >
-                Transfer
-              </Button>
-              <Button
-                variant="outline"
-                size="sm"
-                icon={<Undo2 className="h-4 w-4" />}
-                onClick={() => onAction("return", asset.id)}
-              >
-                Return
-              </Button>
-            </>
-          )}
-          {asset.status !== "Under Repair" && asset.status !== "Disposed" && (
             <Button
               variant="outline"
               size="sm"

@@ -28,8 +28,9 @@ import {
   hasDellCredentials,
   clearDellCredentials,
   testDellConnection,
-  lookupWarranty,
 } from "@/lib/dellApi";
+import { fetchAssetsFromSupabase } from "@/lib/supabaseData";
+import { syncUncachedDellWarranties } from "@/lib/dellWarrantySync";
 
 const assets: any[] = [];
 const employees: any[] = [];
@@ -238,27 +239,35 @@ export function SettingsPage() {
       showToast("Configure Dell API credentials first.", "warning");
       return;
     }
-    const tags = assets.filter((a) => a.serviceTag).map((a) => a.serviceTag);
     setBulkLoading(true);
     setBulkResults([]);
     try {
-      const results = await lookupWarranty(tags);
-      const rows = results.map((r) => ({
-        tag: r.serviceTag,
-        status: r.invalid
-          ? "Invalid"
-          : r.isUnderWarranty
-            ? "Active"
-            : "Expired",
-        expiry: r.warrantyEndDate
-          ? new Date(r.warrantyEndDate).toLocaleDateString("en-IN")
-          : "—",
-        level: r.serviceLevelDescription ?? "—",
-      }));
+      const checkedCount = await syncUncachedDellWarranties();
+      const savedAssets = await fetchAssetsFromSupabase();
+      const rows = savedAssets
+        .filter(
+          (asset) =>
+            asset.serviceTag &&
+            asset.warrantyCheckedAt &&
+            /^(Laptop|Monitor|Docking Station)(\s*-|$)/i.test(asset.category) &&
+            /dell/i.test(asset.manufacturer),
+        )
+        .map((asset) => ({
+          tag: asset.serviceTag,
+          status: asset.warrantyStatus,
+          expiry: asset.warrantyEnd === "N/A" ? "—" : asset.warrantyEnd,
+          level: "—",
+        }));
       setBulkResults(rows);
-      showToast(`Warranty checked for ${rows.length} assets.`, "success");
+      showToast(
+        `Loaded saved warranty data for ${rows.length} asset(s); ${checkedCount} newly checked.`,
+        "success",
+      );
     } catch (e) {
-      showToast((e as Error).message, "error");
+      showToast(
+        e instanceof Error ? e.message : "Could not load warranty data.",
+        "error",
+      );
     } finally {
       setBulkLoading(false);
     }

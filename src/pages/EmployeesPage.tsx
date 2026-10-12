@@ -11,6 +11,9 @@ import {
   Plus,
   Download,
   Upload,
+  ArrowLeftRight,
+  FileText,
+  Undo2,
 } from "lucide-react";
 import { PageHeader } from "@/components/shared/PageHeader";
 import { Card } from "@/components/ui/Card";
@@ -29,6 +32,8 @@ import { StatusBadge, ConditionBadge } from "@/components/ui/StatusBadges";
 import { Pagination } from "@/components/ui/Pagination";
 import { useToast } from "@/components/ui/Toast";
 import { AddEmployeeModal } from "@/components/employees/AddEmployeeModal";
+import { HandoverDocument } from "@/components/assets/HandoverDocument";
+import type { AssetAction } from "@/components/assets/AssetActionDialogs";
 import {
   initEmployeeWorkbook,
   getExcelEmployees,
@@ -49,11 +54,33 @@ import {
 } from "@/lib/assetStockLookup";
 import { getInitials, classNames, normalizeServiceTag } from "@/lib/utils";
 import type { Asset, Employee } from "@/types";
+import type { AppUserProfile } from "@/lib/auth";
 
 interface EmployeesPageProps {
   selectedEmployeeId: string | null;
   onEmployeeSelect: (id: string) => void;
   onAssetSelect: (assetId: string) => void;
+  onAction: (action: AssetAction, assetId: string) => void;
+  profile: AppUserProfile;
+  refreshVersion: number;
+}
+
+type EmployeeAssetAction = "handover" | "transfer" | "return";
+
+function getEmployeeAssignedAssets(
+  employee: Employee,
+  assets: Asset[],
+): Asset[] {
+  const employeeUuid = employee._uuid ?? "";
+  const employeeId = employee.empId ?? employee.id;
+  return assets.filter((asset) => {
+    if (asset.status !== "Assigned") return false;
+    if (employeeUuid && asset.assignedToEmployeeUuid === employeeUuid) return true;
+    return (
+      asset.assignedToEmployeeId === employeeId ||
+      asset.assignedToEmployeeName === employee.fullName
+    );
+  });
 }
 
 const ITEMS_PER_PAGE = 12;
@@ -108,6 +135,9 @@ export function EmployeesPage({
   selectedEmployeeId,
   onEmployeeSelect,
   onAssetSelect,
+  onAction,
+  profile,
+  refreshVersion,
 }: EmployeesPageProps) {
   const { showToast } = useToast();
   const [search, setSearch] = useState("");
@@ -115,6 +145,11 @@ export function EmployeesPage({
   const [locationFilter, setLocationFilter] = useState("");
   const [page, setPage] = useState(1);
   const [drawerOpen, setDrawerOpen] = useState(false);
+  const [handoverAssetId, setHandoverAssetId] = useState("");
+  const [employeeActionSelection, setEmployeeActionSelection] = useState<{
+    employee: Employee;
+    action: EmployeeAssetAction;
+  } | null>(null);
   const [addModalOpen, setAddModalOpen] = useState(false);
   const [addAssetsModalOpen, setAddAssetsModalOpen] = useState(false);
   const [selectedStockAssetId, setSelectedStockAssetId] = useState("");
@@ -169,7 +204,7 @@ export function EmployeesPage({
           "error",
         );
       });
-  }, [showToast]);
+  }, [refreshVersion, showToast]);
 
   const allEmployees = useMemo(() => {
     const merged: Employee[] = [];
@@ -674,17 +709,7 @@ export function EmployeesPage({
   );
   const employeeAssets = useMemo(() => {
     if (!selectedEmployee) return [];
-    const empUuid = selectedEmployee._uuid ?? "";
-    const empId = selectedEmployee.empId ?? selectedEmployee.id;
-    return supabaseAssets.filter((asset) => {
-      // Primary match: by the Supabase UUID stored in assets.assigned_to
-      if (empUuid && asset.assignedToEmployeeUuid === empUuid) return true;
-      // Fallback: match by emp_id string or full name
-      return (
-        asset.assignedToEmployeeId === empId ||
-        asset.assignedToEmployeeName === selectedEmployee.fullName
-      );
-    });
+    return getEmployeeAssignedAssets(selectedEmployee, supabaseAssets);
   }, [selectedEmployee, supabaseAssets]);
   const stockAssetOptions = useMemo(
     () =>
@@ -745,6 +770,21 @@ export function EmployeesPage({
   const handleRowClick = (emp: Employee) => {
     onEmployeeSelect(emp.id);
     setDrawerOpen(true);
+  };
+
+  const handleChooseEmployeeAsset = (assetId: string) => {
+    if (!employeeActionSelection) return;
+    const { employee, action } = employeeActionSelection;
+    setEmployeeActionSelection(null);
+
+    if (action === "handover") {
+      onEmployeeSelect(employee.id);
+      setDrawerOpen(true);
+      setHandoverAssetId(assetId);
+      return;
+    }
+
+    onAction(action, assetId);
   };
 
   return (
@@ -948,17 +988,62 @@ export function EmployeesPage({
                       </button>
                     </TD>
                     <TD
-                      className="text-right"
+                      className="min-w-[330px]"
                       onClick={(e) => e.stopPropagation()}
                     >
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        icon={<Eye className="h-4 w-4 text-blue-400" />}
-                        onClick={() => handleRowClick(emp)}
-                      >
-                        View
-                      </Button>
+                      <div className="flex flex-wrap justify-end gap-1">
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          icon={<Eye className="h-4 w-4 text-blue-400" />}
+                          onClick={() => handleRowClick(emp)}
+                        >
+                          View
+                        </Button>
+                        {count > 0 && (
+                          <>
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              icon={<FileText className="h-4 w-4 text-blue-400" />}
+                              onClick={() =>
+                                setEmployeeActionSelection({
+                                  employee: emp,
+                                  action: "handover",
+                                })
+                              }
+                            >
+                              Handover
+                            </Button>
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              icon={<ArrowLeftRight className="h-4 w-4 text-slate-300" />}
+                              onClick={() =>
+                                setEmployeeActionSelection({
+                                  employee: emp,
+                                  action: "transfer",
+                                })
+                              }
+                            >
+                              Transfer
+                            </Button>
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              icon={<Undo2 className="h-4 w-4 text-amber-400" />}
+                              onClick={() =>
+                                setEmployeeActionSelection({
+                                  employee: emp,
+                                  action: "return",
+                                })
+                              }
+                            >
+                              Return
+                            </Button>
+                          </>
+                        )}
+                      </div>
                     </TD>
                   </TR>
                 );
@@ -976,6 +1061,64 @@ export function EmployeesPage({
           />
         )}
       </Card>
+
+      <Modal
+        open={Boolean(employeeActionSelection)}
+        onClose={() => setEmployeeActionSelection(null)}
+        title={
+          employeeActionSelection
+            ? `Choose an asset to ${employeeActionSelection.action}`
+            : "Choose an asset"
+        }
+        description={employeeActionSelection?.employee.fullName}
+        size="lg"
+      >
+        <div className="space-y-2">
+          {(employeeActionSelection
+            ? getEmployeeAssignedAssets(
+                employeeActionSelection.employee,
+                supabaseAssets,
+              )
+            : []
+          ).map((asset) => (
+            <button
+              key={asset.id}
+              type="button"
+              onClick={() => handleChooseEmployeeAsset(asset.id)}
+              className="flex w-full items-center justify-between gap-4 rounded-lg border border-slate-700 bg-slate-900/70 p-3 text-left transition-colors hover:border-blue-500/60 hover:bg-slate-800"
+            >
+              <span className="min-w-0">
+                <span className="block truncate text-sm font-semibold text-slate-100">
+                  {asset.model}
+                </span>
+                <span className="mt-1 block truncate font-mono text-xs text-slate-400">
+                  {asset.id} · {asset.serviceTag || asset.serialNumber}
+                </span>
+              </span>
+              <span className="flex-shrink-0 rounded-md bg-blue-600 px-3 py-1.5 text-xs font-semibold text-white">
+                Select
+              </span>
+            </button>
+          ))}
+          {employeeActionSelection &&
+            getEmployeeAssignedAssets(
+              employeeActionSelection.employee,
+              supabaseAssets,
+            ).length === 0 && (
+              <p className="rounded-lg border border-dashed border-slate-700 p-5 text-center text-sm text-slate-400">
+                No assigned assets are available for this employee.
+              </p>
+            )}
+          <div className="flex justify-end pt-2">
+            <Button
+              variant="outline"
+              onClick={() => setEmployeeActionSelection(null)}
+            >
+              Cancel
+            </Button>
+          </div>
+        </div>
+      </Modal>
 
       {/* Employee Details Drawer */}
       <Drawer
@@ -1152,7 +1295,7 @@ export function EmployeesPage({
                             </div>
                           </div>
                         </div>
-                        <div className="flex flex-col gap-1.5 flex-shrink-0">
+                        <div className="flex flex-wrap justify-end gap-1.5 flex-shrink-0">
                           <Button
                             variant="ghost"
                             size="sm"
@@ -1164,6 +1307,34 @@ export function EmployeesPage({
                           >
                             View Asset
                           </Button>
+                          {asset.status === "Assigned" && (
+                            <>
+                              <Button
+                                variant="ghost"
+                                size="sm"
+                                icon={<FileText className="h-3.5 w-3.5 text-blue-400" />}
+                                onClick={() => setHandoverAssetId(asset.id)}
+                              >
+                                Handover
+                              </Button>
+                              <Button
+                                variant="ghost"
+                                size="sm"
+                                icon={<ArrowLeftRight className="h-3.5 w-3.5 text-slate-300" />}
+                                onClick={() => onAction("transfer", asset.id)}
+                              >
+                                Transfer
+                              </Button>
+                              <Button
+                                variant="ghost"
+                                size="sm"
+                                icon={<Undo2 className="h-3.5 w-3.5 text-amber-400" />}
+                                onClick={() => onAction("return", asset.id)}
+                              >
+                                Return
+                              </Button>
+                            </>
+                          )}
                         </div>
                       </div>
                     </div>
@@ -1171,6 +1342,15 @@ export function EmployeesPage({
                 </div>
               )}
             </section>
+            {handoverAssetId && (
+              <HandoverDocument
+                open
+                onClose={() => setHandoverAssetId("")}
+                assetId={handoverAssetId}
+                profile={profile}
+                refreshVersion={refreshVersion}
+              />
+            )}
           </div>
         )}
       </Drawer>

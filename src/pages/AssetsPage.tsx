@@ -1,22 +1,16 @@
-import { useState, useMemo, useEffect } from "react";
+import { useState, useMemo, useEffect, useRef, type ChangeEvent } from "react";
 import {
-  Eye,
-  FileText,
-  UserCheck,
-  ArrowLeftRight,
-  Undo2,
-  Wrench,
-  Trash2,
-  Laptop,
   MapPin,
-  Building2,
   Filter,
   X,
+  Upload,
 } from "lucide-react";
+import * as XLSX from "xlsx";
 import { PageHeader } from "@/components/shared/PageHeader";
-import { Card, StatCard } from "@/components/ui/Card";
+import { Card } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
 import { SearchInput, Select } from "@/components/ui/Form";
+import { Modal } from "@/components/ui/Modal";
 import { Table, THead, TBody, TR, TH, TD } from "@/components/ui/Table";
 import { Pagination } from "@/components/ui/Pagination";
 import { AddAssetModal } from "@/components/assets/AddAssetModal";
@@ -26,12 +20,16 @@ import {
   type AssetAction,
 } from "@/components/assets/AssetActionDialogs";
 import { ProvisionTemplateModal } from "@/components/assets/ProvisionTemplateModal";
-import { HandoverFormModal } from "@/components/assets/HandoverFormModal";
 import { useToast } from "@/components/ui/Toast";
 import { fetchAssetsFromSupabase } from "@/lib/supabaseData";
-import { supabaseConfig } from "@/lib/supabase";
-import { getInitials, classNames, getStatusBadgeClass } from "@/lib/utils";
-import type { Asset, Location, AssetCategory, Department } from "@/types";
+import { supabase, supabaseConfig } from "@/lib/supabase";
+import type { AppUserProfile } from "@/lib/auth";
+import {
+  classNames,
+  getStatusBadgeClass,
+  normalizeServiceTag,
+} from "@/lib/utils";
+import type { Asset, Location, AssetCategory } from "@/types";
 
 interface AssetsPageProps {
   selectedAssetId: string | null;
@@ -39,9 +37,96 @@ interface AssetsPageProps {
   refreshVersion?: number;
   locationFilter?: Location | null;
   onClearLocationFilter?: () => void;
+  profile: AppUserProfile;
 }
 
 const ITEMS_PER_PAGE = 12;
+const DETAIL_IMPORT_CATEGORIES: Record<string, string> = {
+  laptop: "Laptop",
+  "hub monitor": "Monitor",
+  "monitor - hub": "Monitor",
+  "monitor - dell p2425he": "Monitor",
+  "normal monitor": "Monitor",
+  "monitor - normal": "Monitor",
+  "monitor - dell p2422h": "Monitor",
+  monitor: "Monitor",
+  "docking station": "Docking Station",
+  "docking station - wd19dcs": "Docking Station",
+  headset: "Headset",
+};
+
+function parseImportDate(value: unknown): string | null {
+  if (value instanceof Date && !Number.isNaN(value.getTime())) {
+    return `${value.getFullYear()}-${String(value.getMonth() + 1).padStart(2, "0")}-${String(value.getDate()).padStart(2, "0")}`;
+  }
+
+  const text = String(value ?? "").trim();
+  if (!text) return null;
+
+  if (/^\d{4}-\d{1,2}-\d{1,2}$/.test(text)) {
+    const [year, month, day] = text.split("-").map(Number);
+    const parsed = new Date(Date.UTC(year, month - 1, day));
+    return parsed.getUTCFullYear() === year &&
+      parsed.getUTCMonth() === month - 1 &&
+      parsed.getUTCDate() === day
+      ? `${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`
+      : null;
+  }
+
+  const dmy = text.match(/^(\d{1,2})[./-](\d{1,2})[./-](\d{4})$/);
+  if (dmy) {
+    const [, dayText, monthText, yearText] = dmy;
+    const day = Number(dayText);
+    const month = Number(monthText);
+    const year = Number(yearText);
+    const parsed = new Date(Date.UTC(year, month - 1, day));
+    return parsed.getUTCFullYear() === year &&
+      parsed.getUTCMonth() === month - 1 &&
+      parsed.getUTCDate() === day
+      ? `${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`
+      : null;
+  }
+
+  if (/^\d+(\.\d+)?$/.test(text)) {
+    const excelDate = XLSX.SSF.parse_date_code(Number(text));
+    if (!excelDate) return null;
+    return `${excelDate.y}-${String(excelDate.m).padStart(2, "0")}-${String(excelDate.d).padStart(2, "0")}`;
+  }
+
+  return null;
+}
+
+function formatWarrantyRemaining(value: string): string {
+  if (!value || value === "N/A") return "—";
+  const match = value.match(/^(\d{1,2})-(\d{1,2})-(\d{4})$/);
+  const endDate = match
+    ? new Date(Number(match[3]), Number(match[2]) - 1, Number(match[1]))
+    : new Date(value);
+  if (Number.isNaN(endDate.getTime())) return "—";
+
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  endDate.setHours(0, 0, 0, 0);
+  if (endDate < today) return "Expired";
+
+  let years = endDate.getFullYear() - today.getFullYear();
+  let months = endDate.getMonth() - today.getMonth();
+  let days = endDate.getDate() - today.getDate();
+  if (days < 0) {
+    months -= 1;
+    const previousMonthDays = new Date(
+      endDate.getFullYear(),
+      endDate.getMonth(),
+      0,
+    ).getDate();
+    days += previousMonthDays;
+  }
+  if (months < 0) {
+    years -= 1;
+    months += 12;
+  }
+  return `${years}Y ${months}M ${days}D`;
+}
 
 export function AssetsPage({
   selectedAssetId,
@@ -49,6 +134,7 @@ export function AssetsPage({
   refreshVersion = 0,
   locationFilter,
   onClearLocationFilter,
+  profile,
 }: AssetsPageProps) {
   const { showToast } = useToast();
   const [search, setSearch] = useState("");
@@ -58,6 +144,9 @@ export function AssetsPage({
   const [page, setPage] = useState(1);
   const [liveAssets, setLiveAssets] = useState<Asset[]>([]);
   const [isLoading, setIsLoading] = useState(true);
+  const [showOtherDetailsModal, setShowOtherDetailsModal] = useState(false);
+  const [isImportingDetails, setIsImportingDetails] = useState(false);
+  const detailImportInputRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -100,13 +189,11 @@ export function AssetsPage({
     return () => {
       cancelled = true;
     };
-  }, [refreshVersion]);
+  }, [refreshVersion, showToast]);
 
   // Modals & Drawers
   const [showAddModal, setShowAddModal] = useState(false);
   const [showTemplateModal, setShowTemplateModal] = useState(false);
-  const [showHandoverModal, setShowHandoverModal] = useState(false);
-  const [handoverAssetId, setHandoverAssetId] = useState<string>("");
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [action, setAction] = useState<{
     type: AssetAction;
@@ -130,7 +217,7 @@ export function AssetsPage({
   );
 
   const filtered = useMemo(() => {
-    return liveAssets.filter((a) => {
+    return assignedAssets.filter((a) => {
       const q = search.toLowerCase();
       const matchesSearch =
         !q ||
@@ -140,6 +227,7 @@ export function AssetsPage({
         a.name.toLowerCase().includes(q) ||
         a.model.toLowerCase().includes(q) ||
         a.assignedToEmployeeName?.toLowerCase().includes(q) ||
+        a.assignedToEmployeeEmail?.toLowerCase().includes(q) ||
         a.assignedToEmployeeId?.toLowerCase().includes(q);
 
       const matchesCategory = !categoryFilter || a.category === categoryFilter;
@@ -154,7 +242,7 @@ export function AssetsPage({
 
       return matchesSearch && matchesCategory && matchesLocation && matchesDept;
     });
-  }, [liveAssets, search, categoryFilter, effectiveLocation, deptFilter]);
+  }, [assignedAssets, search, categoryFilter, effectiveLocation, deptFilter]);
 
   const totalPages = Math.ceil(filtered.length / ITEMS_PER_PAGE);
   const pageData = filtered.slice(
@@ -199,21 +287,248 @@ export function AssetsPage({
     setDrawerOpen(true);
   };
 
-  const handleOpenHandoverForm = (assetId: string) => {
-    setHandoverAssetId(assetId);
-    setShowHandoverModal(true);
-  };
-
   const handleAction = (type: AssetAction, assetId: string) => {
     setAction({ type, assetId });
+  };
+
+  const handleDownloadDetailsTemplate = () => {
+    const worksheet = XLSX.utils.aoa_to_sheet([
+      ["Category", "Invoice", "Purchase Date", "Service Tag"],
+      ["Laptop", "INV-2026-001", "2026-01-15", "DELL-SERVICE-TAG"],
+      ["Hub Monitor", "INV-2026-002", "2026-01-15", "MONITOR-SERVICE-TAG"],
+      ["Normal Monitor", "INV-2026-003", "2026-01-15", "MONITOR-SERVICE-TAG"],
+      ["Docking Station", "INV-2026-004", "2026-01-15", "DOCK-SERVICE-TAG"],
+      ["Headset", "INV-2026-005", "2026-01-15", "HEADSET-SERVICE-TAG"],
+    ]);
+    worksheet["!cols"] = [
+      { wch: 20 },
+      { wch: 24 },
+      { wch: 18 },
+      { wch: 28 },
+    ];
+    const workbook = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(workbook, worksheet, "Asset Details");
+    XLSX.writeFile(workbook, "asset-other-details-template.xlsx");
+  };
+
+  const handleImportOtherDetails = async (
+    event: ChangeEvent<HTMLInputElement>,
+  ) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    setIsImportingDetails(true);
+    let updatedCount = 0;
+
+    try {
+      if (!supabaseConfig.isConfigured) {
+        throw new Error("Supabase is not configured. Cannot update asset details.");
+      }
+
+      const workbook = XLSX.read(await file.arrayBuffer(), {
+        type: "array",
+        cellDates: true,
+      });
+      const firstSheetName = workbook.SheetNames[0];
+      const firstSheet = firstSheetName
+        ? workbook.Sheets[firstSheetName]
+        : undefined;
+      if (!firstSheet) throw new Error("The selected workbook has no worksheet.");
+
+      const rows = XLSX.utils.sheet_to_json(firstSheet, {
+        header: 1,
+        raw: true,
+        defval: "",
+      }) as unknown[][];
+      if (rows.length < 2) {
+        throw new Error("The file has no asset detail rows to import.");
+      }
+
+      const headers = rows[0].map((value) =>
+        String(value ?? "").trim().toLowerCase().replace(/[^a-z0-9]/g, ""),
+      );
+      const categoryIndex = headers.indexOf("category");
+      const invoiceIndex = headers.findIndex((header) =>
+        ["invoice", "invoicenumber", "invoiceno"].includes(header),
+      );
+      const purchaseDateIndex = headers.findIndex((header) =>
+        ["purchasedate", "dateofpurchase"].includes(header),
+      );
+      const serviceTagIndex = headers.findIndex((header) =>
+        ["servicetag", "serialtag", "tag"].includes(header),
+      );
+      if (
+        categoryIndex === -1 ||
+        invoiceIndex === -1 ||
+        purchaseDateIndex === -1 ||
+        serviceTagIndex === -1
+      ) {
+        throw new Error(
+          "Use the template headers: Category, Invoice, Purchase Date, Service Tag.",
+        );
+      }
+
+      const parsedRows = rows
+        .slice(1)
+        .map((row, index) => {
+          const categoryLabel = String(row[categoryIndex] ?? "").trim();
+          const category =
+            DETAIL_IMPORT_CATEGORIES[categoryLabel.toLowerCase()];
+          const invoice = String(row[invoiceIndex] ?? "").trim();
+          const purchaseDate = parseImportDate(row[purchaseDateIndex]);
+          const serviceTag = normalizeServiceTag(
+            String(row[serviceTagIndex] ?? ""),
+          );
+          return {
+            rowNumber: index + 2,
+            categoryLabel,
+            category,
+            invoice,
+            purchaseDate,
+            serviceTag,
+          };
+        })
+        .filter(
+          (row) =>
+            row.categoryLabel ||
+            row.invoice ||
+            row.purchaseDate ||
+            row.serviceTag,
+        );
+
+      if (parsedRows.length === 0) {
+        throw new Error("No non-empty asset detail rows were found.");
+      }
+
+      const validationErrors: string[] = [];
+      const seenTags = new Set<string>();
+      for (const row of parsedRows) {
+        if (!row.category) {
+          validationErrors.push(
+            `Row ${row.rowNumber}: Category must be Laptop, Hub Monitor, Normal Monitor, Docking Station, or Headset.`,
+          );
+        }
+        if (!row.invoice) {
+          validationErrors.push(`Row ${row.rowNumber}: Invoice is required.`);
+        }
+        if (!row.purchaseDate) {
+          validationErrors.push(
+            `Row ${row.rowNumber}: Purchase Date is missing or invalid.`,
+          );
+        }
+        if (!row.serviceTag) {
+          validationErrors.push(`Row ${row.rowNumber}: Service Tag is required.`);
+        } else if (seenTags.has(row.serviceTag)) {
+          validationErrors.push(
+            `Row ${row.rowNumber}: Service Tag ${row.serviceTag} appears more than once.`,
+          );
+        } else {
+          seenTags.add(row.serviceTag);
+        }
+      }
+      if (validationErrors.length) {
+        throw new Error(validationErrors.slice(0, 5).join(" "));
+      }
+
+      const {
+        data: matchingAssets,
+        error: matchingAssetsError,
+      } = await supabase
+        .from("assets")
+        .select("id, service_tag, category")
+        .not("service_tag", "is", null);
+      if (matchingAssetsError) throw matchingAssetsError;
+
+      const assetsByServiceTag = new Map<
+        string,
+        { id: string; category: string }[]
+      >();
+      (matchingAssets ?? []).forEach((asset) => {
+        const tag = normalizeServiceTag(asset.service_tag);
+        const matches = assetsByServiceTag.get(tag) ?? [];
+        matches.push({ id: asset.id, category: asset.category });
+        assetsByServiceTag.set(tag, matches);
+      });
+      const unmatchedTags = parsedRows
+        .filter((row) => !assetsByServiceTag.has(row.serviceTag))
+        .map((row) => row.serviceTag);
+      if (unmatchedTags.length) {
+        throw new Error(
+          `No database asset matches these service tags: ${unmatchedTags.slice(0, 5).join(", ")}.`,
+        );
+      }
+
+      for (const row of parsedRows) {
+        const matches = assetsByServiceTag.get(row.serviceTag) ?? [];
+        if (matches.length !== 1) {
+          throw new Error(
+            `Service tag ${row.serviceTag} matches multiple database assets.`,
+          );
+        }
+        const [asset] = matches;
+        if (asset.category !== row.category) {
+          throw new Error(
+            `Category in row ${row.rowNumber} does not match the database category for service tag ${row.serviceTag}.`,
+          );
+        }
+        const { error } = await supabase
+          .from("assets")
+          .update({
+            category: row.category,
+            invoice_number: row.invoice,
+            purchase_date: row.purchaseDate,
+            updated_at: new Date().toISOString(),
+          })
+          .eq("id", asset.id);
+        if (error) {
+          throw new Error(
+            `Import stopped at service tag ${row.serviceTag}: ${error.message}`,
+          );
+        }
+        updatedCount += 1;
+      }
+
+      const updatedAssets = await fetchAssetsFromSupabase();
+      setLiveAssets(updatedAssets);
+      setShowOtherDetailsModal(false);
+      showToast(
+        `Updated invoice and purchase details for ${parsedRows.length} asset(s).`,
+        "success",
+      );
+    } catch (error) {
+      console.error("Could not import additional asset details:", error);
+      const message =
+        error instanceof Error
+          ? error.message
+          : "Could not import additional asset details.";
+      showToast(
+        updatedCount > 0
+          ? `${message} ${updatedCount} earlier asset(s) were already updated.`
+          : message,
+        "error",
+      );
+    } finally {
+      setIsImportingDetails(false);
+      if (detailImportInputRef.current) {
+        detailImportInputRef.current.value = "";
+      }
+    }
   };
 
   return (
     <div className="space-y-6">
       {/* Page Header */}
       <PageHeader
-        title="Assets Inventory"
-        subtitle={`${liveAssets.length} assets in database · ${assignedAssets.length} assigned to employees`}
+        title="Assigned Assets"
+        subtitle={`${assignedAssets.length} assets currently assigned to employees`}
+        actions={
+          <Button
+            variant="outline"
+            icon={<Upload className="h-4 w-4" />}
+            onClick={() => setShowOtherDetailsModal(true)}
+          >
+            Add Other Details
+          </Button>
+        }
       />
 
       {/* Location Filter Banner if active */}
@@ -332,30 +647,33 @@ export function AssetsPage({
             Loading asset data...
           </div>
         ) : (
+          <div className="overflow-x-auto">
           <Table>
             <THead>
               <TR className="border-b border-slate-700 bg-slate-900/60">
                 <TH>Asset Tag</TH>
                 <TH>Model Name</TH>
                 <TH>Service Tag</TH>
+                <TH>Invoice</TH>
+                <TH>Purchase Date</TH>
+                <TH>Warranty Left</TH>
                 <TH>Status</TH>
                 <TH>Employee ID</TH>
-                <TH>Employee Name</TH>
+                <TH>Employee Email</TH>
                 <TH>Location</TH>
                 <TH>Assigned Date</TH>
-                <TH className="text-right">Actions</TH>
               </TR>
             </THead>
             <TBody>
-              {liveAssets.length === 0 ? (
+              {assignedAssets.length === 0 ? (
                 <TR>
-                  <TD colSpan={9} className="text-center py-12 text-slate-400">
-                    No asset data is available yet.
+                  <TD colSpan={11} className="text-center py-12 text-slate-400">
+                    No assigned assets are available.
                   </TD>
                 </TR>
               ) : pageData.length === 0 ? (
                 <TR>
-                  <TD colSpan={9} className="text-center py-12 text-slate-400">
+                  <TD colSpan={11} className="text-center py-12 text-slate-400">
                     No assets found matching your criteria.
                   </TD>
                 </TR>
@@ -379,6 +697,15 @@ export function AssetsPage({
                         {asset.serviceTag || "—"}
                       </span>
                     </TD>
+                    <TD className="max-w-[180px] break-words text-xs text-slate-300">
+                      {asset.invoiceNumber || "—"}
+                    </TD>
+                    <TD className="whitespace-nowrap text-xs text-slate-300">
+                      {asset.purchaseDate === "N/A" ? "—" : asset.purchaseDate}
+                    </TD>
+                    <TD className="whitespace-nowrap text-xs font-medium text-slate-300">
+                      {formatWarrantyRemaining(asset.warrantyEnd)}
+                    </TD>
                     <TD>
                       <span
                         className={classNames(
@@ -395,69 +722,25 @@ export function AssetsPage({
                       </span>
                     </TD>
                     <TD>
-                      <div className="flex items-center gap-2">
-                        <span className="flex h-7 w-7 items-center justify-center rounded-full bg-blue-600/80 text-xs font-semibold text-white shadow-sm flex-shrink-0">
-                          {getInitials(asset.assignedToEmployeeName || "")}
-                        </span>
-                        <p className="text-sm font-semibold text-slate-100 truncate">
-                          {asset.assignedToEmployeeName || "Unassigned"}
-                        </p>
-                      </div>
+                      <p className="text-sm font-medium text-slate-200">
+                        {asset.assignedToEmployeeEmail || "—"}
+                      </p>
                     </TD>
                     <TD>
                       <span className="flex items-center gap-1.5 text-xs font-medium text-slate-300">
                         <MapPin className="h-3.5 w-3.5 text-blue-400" />
-                        {asset.location}
+                        {asset.locationLabel || asset.location}
                       </span>
                     </TD>
                     <TD className="text-xs text-slate-300 whitespace-nowrap">
                       {asset.assignedDate || "-"}
-                    </TD>
-                    <TD
-                      className="text-right"
-                      onClick={(e) => e.stopPropagation()}
-                    >
-                      <div className="flex items-center justify-end gap-1">
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          icon={
-                            <FileText className="h-3.5 w-3.5 text-blue-400" />
-                          }
-                          onClick={() => handleOpenHandoverForm(asset.id)}
-                          title="Generate / Print Handover Form"
-                        >
-                          Handover
-                        </Button>
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          icon={
-                            <ArrowLeftRight className="h-3.5 w-3.5 text-slate-300" />
-                          }
-                          onClick={() => handleAction("transfer", asset.id)}
-                          title="Transfer Asset"
-                        >
-                          Transfer
-                        </Button>
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          icon={
-                            <Undo2 className="h-3.5 w-3.5 text-amber-400" />
-                          }
-                          onClick={() => handleAction("return", asset.id)}
-                          title="Record Return"
-                        >
-                          Return
-                        </Button>
-                      </div>
                     </TD>
                   </TR>
                 ))
               )}
             </TBody>
           </Table>
+          </div>
         )}
 
         {filtered.length > 0 && (
@@ -471,11 +754,110 @@ export function AssetsPage({
         )}
       </Card>
 
+      <Modal
+        open={showOtherDetailsModal}
+        onClose={() => setShowOtherDetailsModal(false)}
+        title="Add Other Asset Details"
+        description="Import invoice and purchase details for existing assets by matching each service tag."
+        size="lg"
+        footer={
+          <>
+            <Button
+              variant="outline"
+              onClick={handleDownloadDetailsTemplate}
+            >
+              Download Template
+            </Button>
+            <Button
+              variant="outline"
+              onClick={() => setShowOtherDetailsModal(false)}
+            >
+              Cancel
+            </Button>
+          </>
+        }
+      >
+        <div className="space-y-4">
+          <div className="rounded-lg border border-slate-700 bg-slate-900/60 p-4">
+            <p className="text-sm font-semibold text-slate-200">
+              Required columns
+            </p>
+            <div className="mt-3 overflow-x-auto">
+              <table className="min-w-full text-left text-xs text-slate-300">
+                <thead>
+                  <tr className="border-b border-slate-700">
+                    {["Category", "Invoice", "Purchase Date", "Service Tag"].map(
+                      (heading) => (
+                        <th key={heading} className="px-2 py-2">{heading}</th>
+                      ),
+                    )}
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr>
+                    <td className="px-2 py-2">Laptop</td>
+                    <td className="px-2 py-2">INV-2026-001</td>
+                    <td className="px-2 py-2">2026-01-15</td>
+                    <td className="px-2 py-2">DELL-SERVICE-TAG</td>
+                  </tr>
+                  <tr>
+                    <td className="px-2 py-2">Hub Monitor / Normal Monitor</td>
+                    <td className="px-2 py-2">INV-2026-002</td>
+                    <td className="px-2 py-2">2026-01-15</td>
+                    <td className="px-2 py-2">MONITOR-SERVICE-TAG</td>
+                  </tr>
+                  <tr>
+                    <td className="px-2 py-2">Docking Station / Headset</td>
+                    <td className="px-2 py-2">INV-2026-003</td>
+                    <td className="px-2 py-2">2026-01-15</td>
+                    <td className="px-2 py-2">DEVICE-SERVICE-TAG</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+            <p className="mt-3 text-xs text-slate-400">
+              Dates may be YYYY-MM-DD or DD-MM-YYYY. Rows are matched to existing
+              database assets by Service Tag. Warranty left is calculated from
+              the asset’s saved warranty end date.
+            </p>
+          </div>
+
+          <div className="rounded-lg border-2 border-dashed border-slate-700 bg-slate-900/60 p-6 text-center">
+            <Upload className="mx-auto h-9 w-9 text-slate-400" />
+            <p className="mt-3 text-sm font-semibold text-slate-200">
+              Upload Excel or CSV
+            </p>
+            <p className="mt-1 text-xs text-slate-400">
+              Supported categories: Laptop, Hub Monitor, Normal Monitor,
+              Docking Station, and Headset.
+            </p>
+            <input
+              ref={detailImportInputRef}
+              type="file"
+              accept=".xlsx,.xls,.csv"
+              className="hidden"
+              onChange={handleImportOtherDetails}
+            />
+            <Button
+              variant="primary"
+              size="sm"
+              className="mt-4"
+              loading={isImportingDetails}
+              disabled={isImportingDetails}
+              onClick={() => detailImportInputRef.current?.click()}
+            >
+              Choose File
+            </Button>
+          </div>
+        </div>
+      </Modal>
+
       {/* Drawers and Modals */}
       <AssetDetailsDrawer
         open={drawerOpen}
         onClose={() => setDrawerOpen(false)}
         assetId={selectedAssetId}
+        onEdit={() => setDrawerOpen(false)}
         onAction={(type, id) => {
           setDrawerOpen(false);
           handleAction(type, id);
@@ -491,21 +873,14 @@ export function AssetsPage({
       <ProvisionTemplateModal
         open={showTemplateModal}
         onClose={() => setShowTemplateModal(false)}
-        onCompleted={(assetId) => {
-          handleOpenHandoverForm(assetId);
-        }}
-      />
-
-      <HandoverFormModal
-        open={showHandoverModal}
-        onClose={() => setShowHandoverModal(false)}
-        assetId={handoverAssetId}
+        onCompleted={onAssetSelect}
       />
 
       {action && (
         <AssetActionDialogs
           action={action}
           onClose={() => setAction(null)}
+          receivedBy={profile.username}
           onComplete={() => {
             setAction(null);
             fetchAssetsFromSupabase()

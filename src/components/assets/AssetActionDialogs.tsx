@@ -4,11 +4,13 @@ import { Button } from "@/components/ui/Button";
 import { Field, Select, TextInput, TextArea } from "@/components/ui/Form";
 import { useToast } from "@/components/ui/Toast";
 import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
+import { AssetSerialCombobox } from "@/components/assets/AssetSerialCombobox";
 import {
   assignStockAssetsToEmployee,
   fetchAssetsFromSupabase,
   fetchEmployeesFromSupabase,
   returnAssetsToStock,
+  sendAssetForRepair,
   transferAssetsToEmployee,
 } from "@/lib/supabaseData";
 import {
@@ -17,12 +19,19 @@ import {
   formatCategoryLabel,
   formatSerialDisplay,
 } from "@/lib/utils";
-import type { Asset, AssetCondition, Employee, Vendor } from "@/types";
+import type { Asset, AssetCondition, Employee } from "@/types";
 
-const vendors: Vendor[] = [];
+const REPAIR_VENDORS = ["Dell", "Poly"] as const;
 const CONDITIONS: string[] = ["New", "Good", "Fair", "Damaged"];
 const DISPOSAL_REASONS: string[] = [];
 const DISPOSAL_METHODS: string[] = [];
+
+const getLocalDateInputValue = () => {
+  const now = new Date();
+  return new Date(now.getTime() - now.getTimezoneOffset() * 60_000)
+    .toISOString()
+    .slice(0, 10);
+};
 
 const getAsset = (assets: Asset[], assetId: string) =>
   assets.find((item) => item.id === assetId) ?? null;
@@ -39,6 +48,7 @@ interface AssetActionDialogsProps {
   action: { type: AssetAction; assetId: string } | null;
   onClose: () => void;
   onComplete: () => void;
+  receivedBy: string;
 }
 
 const accessoriesOptions = [
@@ -80,6 +90,7 @@ export function AssetActionDialogs({
   action,
   onClose,
   onComplete,
+  receivedBy,
 }: AssetActionDialogsProps) {
   const { showToast } = useToast();
   const [confirmDispose, setConfirmDispose] = useState(false);
@@ -88,6 +99,7 @@ export function AssetActionDialogs({
   const [isSavingAssignment, setIsSavingAssignment] = useState(false);
   const [isSavingTransfer, setIsSavingTransfer] = useState(false);
   const [isSavingReturn, setIsSavingReturn] = useState(false);
+  const [isSavingRepair, setIsSavingRepair] = useState(false);
 
   // Assign state
   const [assignEmployeeId, setAssignEmployeeId] = useState("");
@@ -114,9 +126,7 @@ export function AssetActionDialogs({
   const [returnMissing, setReturnMissing] = useState<string[]>([]);
   const [returnDamage, setReturnDamage] = useState("");
   const [returnRemarks, setReturnRemarks] = useState("");
-  const [returnDate, setReturnDate] = useState(
-    new Date().toISOString().split("T")[0],
-  );
+  const [returnDate, setReturnDate] = useState(getLocalDateInputValue);
   const [returnItemsChoice, setReturnItemsChoice] = useState<
     Record<string, "Yes" | "No">
   >({});
@@ -124,11 +134,12 @@ export function AssetActionDialogs({
   // Repair state
   const [repairIssue, setRepairIssue] = useState("");
   const [repairVendorId, setRepairVendorId] = useState("");
-  const [repairExpectedReturn, setRepairExpectedReturn] = useState("");
-  const [repairCost, setRepairCost] = useState("");
   const [repairDate, setRepairDate] = useState(
     new Date().toISOString().split("T")[0],
   );
+  const [temporaryAssetRequired, setTemporaryAssetRequired] = useState("No");
+  const [temporaryAssetModel, setTemporaryAssetModel] = useState("");
+  const [temporaryAssetTag, setTemporaryAssetTag] = useState("");
 
   // Dispose state
   const [disposeReason, setDisposeReason] = useState("");
@@ -182,6 +193,7 @@ export function AssetActionDialogs({
     }
 
     if (action?.type === "return" && targetAsset) {
+      setReturnDate(getLocalDateInputValue());
       const initialChoices: Record<string, "Yes" | "No"> = {};
       currentEmpDevices.forEach((dev) => {
         initialChoices[dev.id] = "Yes";
@@ -197,8 +209,41 @@ export function AssetActionDialogs({
     label: `${e.fullName} (${e.id})`,
     value: e.id,
   }));
-  const vendorOptions = vendors.map((v) => ({ label: v.name, value: v.id }));
+  const vendorOptions = REPAIR_VENDORS.map((vendor) => ({
+    label: vendor,
+    value: vendor,
+  }));
   const conditionOptions = CONDITIONS.map((c) => ({ label: c, value: c }));
+  const repairAssetKind = targetAsset.category.startsWith("Laptop")
+    ? "Laptop"
+    : targetAsset.category === "Headset"
+      ? "Headset"
+      : null;
+  const automaticRepairVendor =
+    repairAssetKind === "Laptop"
+      ? "Dell"
+      : repairAssetKind === "Headset"
+        ? "Poly"
+        : null;
+  const temporaryStockAssets = repairAssetKind
+    ? assets.filter(
+        (asset) =>
+          asset.category.startsWith(repairAssetKind) &&
+          ["Available", "Returned", "Reserved"].includes(asset.status) &&
+          asset.id !== targetAsset.id &&
+          Boolean(asset.serialNumber.trim()),
+      )
+    : [];
+  const temporaryModelOptions = [
+    ...new Set(temporaryStockAssets.map((asset) => asset.model)),
+  ]
+    .sort()
+    .map((model) => ({ label: model, value: model }));
+  const temporarySerialAssets = temporaryStockAssets
+    .filter((asset) => asset.model === temporaryAssetModel)
+    .sort((left, right) =>
+      left.serialNumber.localeCompare(right.serialNumber),
+    );
 
   const toggleAccessory = (
     list: string[],
@@ -226,8 +271,9 @@ export function AssetActionDialogs({
     setReturnItemsChoice({});
     setRepairIssue("");
     setRepairVendorId("");
-    setRepairExpectedReturn("");
-    setRepairCost("");
+    setTemporaryAssetRequired("No");
+    setTemporaryAssetModel("");
+    setTemporaryAssetTag("");
     setDisposeReason("");
     setDisposeMethod("");
     setDisposeRemarks("");
@@ -683,7 +729,8 @@ export function AssetActionDialogs({
           employeeUuid,
           returnDate,
           condition: returnCondition as AssetCondition,
-          remarks: returnNotes,
+          remarks: returnNotes || "Returned",
+          receivedBy,
         });
         const [nextAssets, nextEmployees] = await Promise.all([
           fetchAssetsFromSupabase(),
@@ -890,6 +937,79 @@ export function AssetActionDialogs({
 
   // ===== REPAIR =====
   if (action.type === "repair") {
+    const handleSendForRepair = async () => {
+      if (
+        !repairIssue.trim() ||
+        (!automaticRepairVendor && !repairVendorId) ||
+        !repairDate
+      ) {
+        showToast("Enter the issue and sent date.", "error");
+        return;
+      }
+      const vendorName =
+        automaticRepairVendor ??
+        REPAIR_VENDORS.find((vendor) => vendor === repairVendorId);
+      if (!vendorName) {
+        showToast("Select Dell or Poly as the repair vendor.", "error");
+        return;
+      }
+      if (!targetAsset.assignedToEmployeeUuid) {
+        showToast(
+          "This asset does not have a current database employee assignment.",
+          "error",
+        );
+        return;
+      }
+      if (
+        temporaryAssetRequired === "Yes" &&
+        (!temporaryAssetModel || !temporaryAssetTag)
+      ) {
+        showToast(
+          "Select a temporary asset model and serial number.",
+          "error",
+        );
+        return;
+      }
+
+      setIsSavingRepair(true);
+      try {
+        await sendAssetForRepair({
+          assetTag: targetAsset.id,
+          employeeUuid: targetAsset.assignedToEmployeeUuid,
+          vendorName,
+          issue: repairIssue,
+          reportedDate: repairDate,
+          temporaryAssetTag:
+            temporaryAssetRequired === "Yes" ? temporaryAssetTag : undefined,
+        });
+        const [nextAssets, nextEmployees] = await Promise.all([
+          fetchAssetsFromSupabase(),
+          fetchEmployeesFromSupabase(),
+        ]);
+        setAssets(nextAssets);
+        setEmployees(nextEmployees);
+        showToast(
+          temporaryAssetRequired === "Yes"
+            ? `Asset sent to ${vendorName} for repair. Temporary ${repairAssetKind?.toLowerCase()} assigned.`
+            : `Asset sent to ${vendorName} for repair.`,
+          "success",
+        );
+        resetState();
+        onComplete();
+        onClose();
+      } catch (error) {
+        console.error("Could not send asset for repair:", error);
+        showToast(
+          error instanceof Error
+            ? error.message
+            : "Could not send the asset for repair.",
+          "error",
+        );
+      } finally {
+        setIsSavingRepair(false);
+      }
+    };
+
     return (
       <Modal
         open
@@ -904,26 +1024,18 @@ export function AssetActionDialogs({
             </Button>
             <Button
               variant="primary"
-              disabled={!repairIssue || !repairVendorId}
-              onClick={() => {
-                targetAsset.status = "Under Repair";
-                targetAsset.history.push({
-                  id: `H-RPR-${Date.now()}`,
-                  date: repairDate,
-                  action: "Sent for Repair",
-                  performedBy: "IT Admin",
-                  details: repairIssue,
-                });
-                showToast(
-                  `Asset ${targetAsset.id} sent for repair. Issue: ${repairIssue}.`,
-                  "success",
-                );
-                resetState();
-                onComplete();
-                onClose();
-              }}
+              disabled={
+                !repairIssue.trim() ||
+                (!automaticRepairVendor && !repairVendorId) ||
+                !repairDate ||
+                isSavingRepair ||
+                (temporaryAssetRequired === "Yes" &&
+                  (!temporaryAssetModel || !temporaryAssetTag))
+              }
+              loading={isSavingRepair}
+              onClick={() => void handleSendForRepair()}
             >
-              Send for Repair
+              {isSavingRepair ? "Sending..." : "Send for Repair"}
             </Button>
           </>
         }
@@ -939,13 +1051,22 @@ export function AssetActionDialogs({
 
           <div className="grid grid-cols-2 gap-4">
             <Field label="Repair Vendor" required>
-              <Select
-                value={repairVendorId}
-                onChange={setRepairVendorId}
-                options={vendorOptions}
-                placeholder="Choose vendor..."
-                className="w-full"
-              />
+              {automaticRepairVendor ? (
+                <TextInput
+                  value={automaticRepairVendor}
+                  onChange={() => {}}
+                  readOnly
+                  className="w-full"
+                />
+              ) : (
+                <Select
+                  value={repairVendorId}
+                  onChange={setRepairVendorId}
+                  options={vendorOptions}
+                  placeholder="Choose vendor..."
+                  className="w-full"
+                />
+              )}
             </Field>
             <Field label="Sent Date" required>
               <TextInput
@@ -957,25 +1078,57 @@ export function AssetActionDialogs({
             </Field>
           </div>
 
-          <div className="grid grid-cols-2 gap-4">
-            <Field label="Expected Return Date">
-              <TextInput
-                type="date"
-                value={repairExpectedReturn}
-                onChange={setRepairExpectedReturn}
-                className="w-full"
-              />
-            </Field>
-            <Field label="Estimated Cost">
-              <TextInput
-                type="number"
-                value={repairCost}
-                onChange={setRepairCost}
-                placeholder="0"
-                className="w-full"
-              />
-            </Field>
-          </div>
+          {repairAssetKind && (
+            <>
+              <Field
+                label={`Temporary ${repairAssetKind.toLowerCase()} for employee?`}
+                required
+              >
+                <Select
+                  value={temporaryAssetRequired}
+                  onChange={(value) => {
+                    setTemporaryAssetRequired(value);
+                    setTemporaryAssetModel("");
+                    setTemporaryAssetTag("");
+                  }}
+                  options={[
+                    { label: "No", value: "No" },
+                    { label: "Yes", value: "Yes" },
+                  ]}
+                  className="w-full"
+                />
+              </Field>
+
+              {temporaryAssetRequired === "Yes" && (
+                <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+                  <Field label={`Temporary ${repairAssetKind} Model`} required>
+                    <Select
+                      value={temporaryAssetModel}
+                      onChange={(model) => {
+                        setTemporaryAssetModel(model);
+                        setTemporaryAssetTag("");
+                      }}
+                      options={temporaryModelOptions}
+                      placeholder={
+                        temporaryModelOptions.length
+                          ? "Choose available model..."
+                          : "No matching stock available"
+                      }
+                      className="w-full"
+                    />
+                  </Field>
+                  <Field label="Serial Number" required>
+                    <AssetSerialCombobox
+                      assets={temporarySerialAssets}
+                      value={temporaryAssetTag}
+                      onChange={(assetId) => setTemporaryAssetTag(assetId)}
+                      placeholder="Type serial number to search..."
+                    />
+                  </Field>
+                </div>
+              )}
+            </>
+          )}
         </div>
       </Modal>
     );

@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { Globe, MapPin, ArrowLeft } from "lucide-react";
 import { Modal } from "@/components/ui/Modal";
 import { Button } from "@/components/ui/Button";
@@ -150,6 +150,8 @@ export function AddEmployeeModal({
   const [step, setStep] = useState<Step>("choose");
   const [userType, setUserType] = useState<EmployeeUserType | null>(null);
   const [form, setForm] = useState<EmployeeFormState>(getInitialForm);
+  const [isSaving, setIsSaving] = useState(false);
+  const savingRef = useRef(false);
 
   const reset = () => {
     setStep("choose");
@@ -160,6 +162,10 @@ export function AddEmployeeModal({
   const handleClose = () => {
     reset();
     onClose();
+  };
+
+  const handleRequestClose = () => {
+    if (!savingRef.current) handleClose();
   };
 
   const handleChooseType = (type: EmployeeUserType) => {
@@ -375,6 +381,10 @@ export function AddEmployeeModal({
 
     const totalAssignedDevices = stockChecks.length;
 
+    if (savingRef.current) return;
+    savingRef.current = true;
+    setIsSaving(true);
+
     try {
       const savedRows = await saveEmployeeToSupabase({
         emp_id: form.empId.trim(),
@@ -469,13 +479,16 @@ export function AddEmployeeModal({
         `Could not save employee: ${getSaveErrorMessage(error)}`,
         "error",
       );
+    } finally {
+      savingRef.current = false;
+      setIsSaving(false);
     }
   };
 
   return (
     <Modal
       open={open}
-      onClose={handleClose}
+      onClose={handleRequestClose}
       title={
         step === "choose"
           ? "Add Employee"
@@ -500,14 +513,23 @@ export function AddEmployeeModal({
               variant="outline"
               icon={<ArrowLeft className="h-4 w-4" />}
               onClick={() => setStep("choose")}
+              disabled={isSaving}
             >
               Back
             </Button>
-            <Button variant="outline" onClick={handleClose}>
+            <Button
+              variant="outline"
+              onClick={handleRequestClose}
+              disabled={isSaving}
+            >
               Cancel
             </Button>
-            <Button variant="primary" onClick={handleSave}>
-              Save Employee
+            <Button
+              variant="primary"
+              onClick={handleSave}
+              loading={isSaving}
+            >
+              {isSaving ? "Saving Employee..." : "Save Employee"}
             </Button>
           </>
         )

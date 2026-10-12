@@ -1,6 +1,7 @@
 import { type ReactNode } from 'react';
 import { Sidebar, type PageKey } from './Sidebar';
 import { Header } from './Header';
+import type { AppUserProfile } from '@/lib/auth';
 
 interface LayoutProps {
   current: PageKey;
@@ -9,6 +10,8 @@ interface LayoutProps {
   onEmployeeSelect: (employeeId: string) => void;
   collapsed: boolean;
   onToggleCollapse: () => void;
+  profile: AppUserProfile;
+  onSignOut: () => void | Promise<void>;
   children: ReactNode;
 }
 
@@ -19,6 +22,8 @@ export function Layout({
   onEmployeeSelect,
   collapsed,
   onToggleCollapse,
+  profile,
+  onSignOut,
   children,
 }: LayoutProps) {
   return (
@@ -34,6 +39,8 @@ export function Layout({
           onNavigate={onNavigate}
           onAssetSelect={onAssetSelect}
           onEmployeeSelect={onEmployeeSelect}
+          profile={profile}
+          onSignOut={onSignOut}
         />
         <main className="flex-1 overflow-y-auto bg-gradient-to-br from-slate-950 via-slate-900 to-slate-950">
           <div className="mx-auto max-w-[1600px] p-4 lg:p-6">{children}</div>

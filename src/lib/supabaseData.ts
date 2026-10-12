@@ -6,6 +6,7 @@ import type {
   AssetStatus,
   AssetCondition,
   WarrantyStatus,
+  Assignment,
   Transfer,
   ReturnRecord,
 } from "@/types";
@@ -98,7 +99,14 @@ const mapLocation = (value?: string | null): Location => {
 /** Format a date string as dd-mm-yyyy */
 function formatDateDMY(value?: string | null): string {
   if (!value) return "N/A";
-  const d = new Date(value);
+  const dateOnly = value.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  const d = dateOnly
+    ? new Date(
+        Number(dateOnly[1]),
+        Number(dateOnly[2]) - 1,
+        Number(dateOnly[3]),
+      )
+    : new Date(value);
   if (Number.isNaN(d.getTime())) return value;
   const dd = String(d.getDate()).padStart(2, "0");
   const mm = String(d.getMonth() + 1).padStart(2, "0");
@@ -114,6 +122,7 @@ const mapEmployee = (row: any): Employee => ({
   department: (row.department ?? "IT") as Employee["department"],
   designation: row.designation ?? "Employee",
   location: mapLocation(row.location),
+  locationLabel: mapLocation(row.location),
   joiningDate: formatDateDMY(row.joining_date ?? row.doj),
   status: row.status === "Inactive" ? "Inactive" : "Working",
   avatarColor: "bg-blue-500",
@@ -261,6 +270,38 @@ export async function saveEmployeeToSupabase(input: {
     );
   };
 
+  const throwIfDuplicateEmployee = (error: unknown) => {
+    if (typeof error !== "object" || error === null) return;
+
+    const databaseError = error as {
+      code?: unknown;
+      constraint?: unknown;
+      details?: unknown;
+      message?: unknown;
+    };
+    if (databaseError.code !== "23505") return;
+
+    const uniqueErrorText = [
+      databaseError.constraint,
+      databaseError.details,
+      databaseError.message,
+    ]
+      .filter((part): part is string => typeof part === "string")
+      .join(" ");
+
+    if (/employees_emp_id_key|key \(emp_id\)/i.test(uniqueErrorText)) {
+      throw new Error(
+        `Employee ID "${input.emp_id}" already exists. Enter a unique Employee ID, or open the existing employee to assign assets.`,
+      );
+    }
+
+    if (/employees_email_key|key \(email\)/i.test(uniqueErrorText)) {
+      throw new Error(
+        `Email "${input.email}" is already registered. Open the existing employee or use a different email address.`,
+      );
+    }
+  };
+
   const insertWithPayload = async (payload: Record<string, unknown>) => {
     const { data, error } = await supabase
       .from("employees")
@@ -272,6 +313,7 @@ export async function saveEmployeeToSupabase(input: {
           `Supabase employee table is missing a required column: ${error.message}`,
         );
       }
+      throwIfDuplicateEmployee(error);
       throw error;
     }
     return data;
@@ -280,8 +322,6 @@ export async function saveEmployeeToSupabase(input: {
   try {
     return await insertWithPayload(fullPayload);
   } catch (error) {
-    const message =
-      error instanceof Error ? error.message : String(error ?? "");
     if (isMissingColumnError(error as any)) {
       return await insertWithPayload(basePayload);
     }
@@ -303,7 +343,33 @@ export async function fetchAssetsFromSupabase(): Promise<Asset[]> {
 
   const { data: employeesData } = await supabase
     .from("employees")
-    .select("id, emp_id, full_name, department, location");
+    .select("id, emp_id, full_name, email, department, location");
+  const assetUuids = assetsData
+    .map((row) => row.id as string | undefined)
+    .filter((id): id is string => Boolean(id));
+  const { data: activeAssignmentRows, error: assignmentsError } =
+    assetUuids.length
+      ? await supabase
+          .from("assignments")
+          .select("asset_id, employee_id, assigned_date")
+          .in("asset_id", assetUuids)
+          .eq("status", "Active")
+      : { data: [], error: null };
+  if (assignmentsError) {
+    console.error("fetchAssetsFromSupabase assignments:", assignmentsError);
+    throw assignmentsError;
+  }
+
+  const activeAssignmentsByAsset = new Map<
+    string,
+    { employee_id: string; assigned_date: string }[]
+  >();
+  (activeAssignmentRows ?? []).forEach((assignment) => {
+    const current = activeAssignmentsByAsset.get(assignment.asset_id) ?? [];
+    current.push(assignment);
+    activeAssignmentsByAsset.set(assignment.asset_id, current);
+  });
+
   const employeeMap = new Map<string, any>();
   (employeesData ?? []).forEach((employee) => {
     employeeMap.set(employee.id, employee);
@@ -311,9 +377,18 @@ export async function fetchAssetsFromSupabase(): Promise<Asset[]> {
   });
 
   const mapped = assetsData.map((row) => {
-    // row.assigned_to holds the employee's Supabase UUID
-    const assignedEmployee = row.assigned_to
-      ? employeeMap.get(row.assigned_to)
+    const activeAssignments = activeAssignmentsByAsset.get(row.id) ?? [];
+    const activeAssignment = row.assigned_to
+      ? activeAssignments.find(
+          (assignment) => assignment.employee_id === row.assigned_to,
+        )
+      : activeAssignments.length === 1
+        ? activeAssignments[0]
+        : undefined;
+    const assignedEmployeeUuid =
+      row.assigned_to ?? activeAssignment?.employee_id ?? undefined;
+    const assignedEmployee = assignedEmployeeUuid
+      ? employeeMap.get(assignedEmployeeUuid)
       : undefined;
 
     // Expose emp_id (e.g. "EMP1025") as the assignedToEmployeeId so the
@@ -321,14 +396,17 @@ export async function fetchAssetsFromSupabase(): Promise<Asset[]> {
     const assignedToEmployeeId: string | undefined =
       assignedEmployee?.emp_id ??
       assignedEmployee?.id ??
-      row.assigned_to ??
+      assignedEmployeeUuid ??
       undefined;
     // Also store the raw UUID so EmployeesPage can match via UUID when needed
-    const assignedToEmployeeUuid: string | undefined =
-      row.assigned_to ?? undefined;
+    const assignedToEmployeeUuid: string | undefined = assignedEmployeeUuid;
     const assignedToEmployeeName: string | undefined =
       assignedEmployee?.full_name ?? assignedEmployee?.fullName ?? undefined;
-    const location = mapLocation(row.location);
+    const assignedToEmployeeEmail: string | undefined =
+      assignedEmployee?.email ?? undefined;
+    const location = assignedEmployee
+      ? mapLocation(assignedEmployee.location)
+      : mapLocation(row.location);
     const category = mapCategory(row.category, row.model, row.name);
     const serviceTagFromDb = (row.service_tag ?? "").toString().trim();
     const rawServiceTag =
@@ -349,7 +427,12 @@ export async function fetchAssetsFromSupabase(): Promise<Asset[]> {
       model: row.model ?? "Unknown Model",
       serialNumber: normalizeSerialNumber(row.serial_number),
       serviceTag,
-      status: mapAssetStatus(row.status),
+      lastModifiedBy: row.last_modified_by ?? undefined,
+      status:
+        assignedEmployeeUuid &&
+        ["Available", "Assigned", "Reserved", "Returned"].includes(row.status)
+          ? "Assigned"
+          : mapAssetStatus(row.status),
       condition: mapAssetCondition(row.condition),
       purchaseDate: row.purchase_date
         ? formatDateDMY(row.purchase_date)
@@ -366,7 +449,9 @@ export async function fetchAssetsFromSupabase(): Promise<Asset[]> {
         ? formatDateDMY(row.warranty_end)
         : "N/A",
       warrantyStatus: mapWarrantyStatus(row.warranty_status),
+      warrantyCheckedAt: row.warranty_checked_at ?? undefined,
       location,
+      locationLabel: location,
       building: row.building ?? "-",
       floor: row.floor ?? "-",
       room: row.room ?? "-",
@@ -374,9 +459,12 @@ export async function fetchAssetsFromSupabase(): Promise<Asset[]> {
       // Extra field used internally for UUID-based matching in EmployeesPage
       assignedToEmployeeUuid,
       assignedToEmployeeName,
+      assignedToEmployeeEmail,
       assignedDate: row.assigned_date
         ? formatDateDMY(row.assigned_date)
-        : undefined,
+        : activeAssignment?.assigned_date
+          ? formatDateDMY(activeAssignment.assigned_date)
+          : undefined,
       receivedDate: row.received_date
         ? formatDateDMY(row.received_date)
         : "N/A",
@@ -395,6 +483,131 @@ export async function fetchAssetsFromSupabase(): Promise<Asset[]> {
   });
 
   return mapped;
+}
+
+export async function fetchActiveAssignmentAssetIdsFromSupabase(): Promise<string[]> {
+  if (!supabaseConfig.isConfigured) return [];
+
+  const { data, error } = await supabase
+    .from("assignments")
+    .select("asset_id")
+    .eq("status", "Active");
+
+  if (error) {
+    console.error("fetchActiveAssignmentAssetIdsFromSupabase:", error);
+    throw error;
+  }
+
+  return [...new Set((data ?? []).map((assignment) => assignment.asset_id))];
+}
+
+export async function fetchActiveAssignmentsFromSupabase(): Promise<Assignment[]> {
+  if (!supabaseConfig.isConfigured) return [];
+
+  const [{ data: rows, error }, assets, employees] = await Promise.all([
+    supabase
+      .from("assignments")
+      .select("id, asset_id, employee_id, assigned_date, status, notes")
+      .eq("status", "Active")
+      .order("assigned_date", { ascending: false }),
+    fetchAssetsFromSupabase(),
+    fetchEmployeesFromSupabase(),
+  ]);
+
+  if (error) {
+    console.error("fetchActiveAssignmentsFromSupabase:", error);
+    throw error;
+  }
+
+  const assetsByUuid = new Map(assets.map((asset) => [asset._uuid, asset]));
+  const employeesByUuid = new Map(
+    employees.map((employee) => [employee._uuid, employee]),
+  );
+  const activeRowsByAsset = new Map<string, (typeof rows)[number][]>();
+
+  (rows ?? []).forEach((row) => {
+    const current = activeRowsByAsset.get(row.asset_id) ?? [];
+    current.push(row);
+    activeRowsByAsset.set(row.asset_id, current);
+  });
+
+  const assignments: Assignment[] = [];
+  const assignedAssetUuids = new Set<string>();
+
+  assets.forEach((asset) => {
+    const assetUuid = asset._uuid;
+    const activeRows = assetUuid
+      ? activeRowsByAsset.get(assetUuid) ?? []
+      : [];
+    const currentOwnerUuid =
+      asset.status === "Assigned" ? asset.assignedToEmployeeUuid : undefined;
+    const activeRow = currentOwnerUuid
+      ? activeRows.find((row) => row.employee_id === currentOwnerUuid) ??
+        undefined
+      : activeRows[0];
+    const employeeUuid = currentOwnerUuid ?? activeRow?.employee_id;
+
+    if (!employeeUuid || !assetUuid) return;
+    const employee = employeesByUuid.get(employeeUuid);
+    const id = activeRow?.id ?? `asset-${assetUuid}`;
+
+    assignments.push({
+      id,
+      assetId: asset.id,
+      assetName: asset.name,
+      employeeId: employee?.empId ?? employee?.id ?? employeeUuid,
+      employeeName: employee?.fullName ?? "Employee",
+      department: employee?.department ?? "IT",
+      location: employee?.location ?? asset.location,
+      assignmentDate:
+        activeRow?.assigned_date
+          ? formatDateDMY(activeRow.assigned_date)
+          : asset.assignedDate ?? "N/A",
+      condition: asset.condition,
+      accessories: [],
+      remarks: activeRow?.notes ?? undefined,
+      status: "Active",
+    });
+    assignedAssetUuids.add(assetUuid);
+  });
+
+  activeRowsByAsset.forEach((activeRows, assetUuid) => {
+    if (assignedAssetUuids.has(assetUuid)) return;
+
+    const asset = assetsByUuid.get(assetUuid);
+    const activeRow = activeRows[0];
+    const employee = employeesByUuid.get(activeRow.employee_id);
+    if (!asset) return;
+
+    assignments.push({
+      id: activeRow.id,
+      assetId: asset.id,
+      assetName: asset.name,
+      employeeId: employee?.empId ?? employee?.id ?? activeRow.employee_id,
+      employeeName: employee?.fullName ?? "Employee",
+      department: employee?.department ?? "IT",
+      location: employee?.location ?? asset.location,
+      assignmentDate: formatDateDMY(activeRow.assigned_date),
+      condition: asset.condition,
+      accessories: [],
+      remarks: activeRow.notes ?? undefined,
+      status: "Active",
+    });
+  });
+
+  const toTimestamp = (value: string) => {
+    const match = value.match(/^(\d{2})-(\d{2})-(\d{4})$/);
+    const normalized = match
+      ? `${match[3]}-${match[2]}-${match[1]}`
+      : value;
+    const timestamp = new Date(normalized).getTime();
+    return Number.isNaN(timestamp) ? 0 : timestamp;
+  };
+
+  return assignments.sort(
+    (left, right) =>
+      toTimestamp(right.assignmentDate) - toTimestamp(left.assignmentDate),
+  );
 }
 
 export async function assignStockAssetsToEmployee(input: {
@@ -486,50 +699,25 @@ export async function transferAssetsToEmployee(input: {
     throw new Error("Both employees must exist in the database to transfer assets.");
   }
 
-  for (const assetTag of [...new Set(input.assetTags)]) {
-    const { data, error } = await supabase
-      .from("assets")
-      .update({
-        assigned_to: input.toEmployeeUuid,
-        location: input.toLocation,
-        assigned_date: new Date(`${input.transferDate}T00:00:00`).toISOString(),
-        updated_at: new Date().toISOString(),
-      })
-      .eq("asset_tag", assetTag)
-      .eq("assigned_to", input.fromEmployeeUuid)
-      .eq("status", "Assigned")
-      .select("id");
-    if (error) throw error;
-    const assetUuid = data?.[0]?.id;
-    if (!assetUuid) {
-      throw new Error(`Asset ${assetTag} is no longer assigned to the original employee.`);
+  const { error } = await supabase.rpc("transfer_assets_to_employee", {
+    p_asset_tags: [...new Set(input.assetTags)],
+    p_from_employee_uuid: input.fromEmployeeUuid,
+    p_to_employee_uuid: input.toEmployeeUuid,
+    p_to_location: input.toLocation,
+    p_transfer_date: new Date(
+      `${input.transferDate}T00:00:00`,
+    ).toISOString(),
+    p_reason: input.reason,
+  });
+
+  if (error) {
+    console.error("transferAssetsToEmployee:", error);
+    if (error.code === "PGRST202" || error.code === "42883") {
+      throw new Error(
+        "The database transfer transaction is not installed. Run supabase/fix_asset_transfer.sql in the Supabase SQL Editor, then retry.",
+      );
     }
-
-    const { error: transferError } = await supabase.from("transfers").insert({
-      asset_id: assetUuid,
-      from_employee_id: input.fromEmployeeUuid,
-      to_employee_id: input.toEmployeeUuid,
-      reason: input.reason,
-      transfer_date: new Date(`${input.transferDate}T00:00:00`).toISOString(),
-      status: "Completed",
-    });
-    if (transferError) throw transferError;
-
-    const { error: closeAssignmentError } = await supabase
-      .from("assignments")
-      .update({ status: "Transferred" })
-      .eq("asset_id", assetUuid)
-      .eq("employee_id", input.fromEmployeeUuid)
-      .eq("status", "Active");
-    if (closeAssignmentError) throw closeAssignmentError;
-    const { error: newAssignmentError } = await supabase.from("assignments").insert({
-      asset_id: assetUuid,
-      employee_id: input.toEmployeeUuid,
-      assigned_date: new Date(`${input.transferDate}T00:00:00`).toISOString(),
-      status: "Active",
-      notes: `Transferred from employee ${input.fromEmployeeUuid}`,
-    });
-    if (newAssignmentError) throw newAssignmentError;
+    throw error;
   }
 }
 
@@ -539,6 +727,7 @@ export async function returnAssetsToStock(input: {
   returnDate: string;
   condition: AssetCondition;
   remarks: string;
+  receivedBy: string;
 }) {
   if (!supabaseConfig.isConfigured) {
     throw new Error("Supabase is not configured.");
@@ -546,42 +735,100 @@ export async function returnAssetsToStock(input: {
   if (!input.employeeUuid) {
     throw new Error("The current employee could not be located in the database.");
   }
+  if (!input.assetTags.length) {
+    throw new Error("Select at least one assigned asset to return.");
+  }
 
-  for (const assetTag of [...new Set(input.assetTags)]) {
-    const { data, error } = await supabase
-      .from("assets")
-      .update({
-        status: "Available",
-        condition: input.condition,
-        assigned_to: null,
-        assigned_date: null,
-        updated_at: new Date().toISOString(),
-      })
-      .eq("asset_tag", assetTag)
-      .eq("assigned_to", input.employeeUuid)
-      .eq("status", "Assigned")
-      .select("id");
-    if (error) throw error;
-    const assetUuid = data?.[0]?.id;
-    if (!assetUuid) {
-      throw new Error(`Asset ${assetTag} is no longer assigned to this employee.`);
+  if (!input.receivedBy.trim()) {
+    throw new Error("The logged-in receiver name is required to record the return.");
+  }
+
+  const { error } = await supabase.rpc("return_assets_to_stock", {
+    p_asset_tags: [...new Set(input.assetTags)],
+    p_employee_uuid: input.employeeUuid,
+    p_return_date: new Date(`${input.returnDate}T00:00:00`).toISOString(),
+    p_condition: input.condition,
+    p_remarks: input.remarks.trim() || "Returned",
+    p_received_by: input.receivedBy.trim(),
+  });
+
+  if (error) {
+    console.error("returnAssetsToStock:", error);
+    if (error.code === "PGRST202" || error.code === "42883") {
+      throw new Error(
+        "The database return workflow is not installed. Run supabase/fix_handover_returns.sql in the Supabase SQL Editor, then retry.",
+      );
     }
+    throw error;
+  }
+}
 
-    const { error: returnError } = await supabase.from("returns").insert({
-      asset_id: assetUuid,
-      employee_id: input.employeeUuid,
-      returned_date: new Date(`${input.returnDate}T00:00:00`).toISOString(),
-      condition: input.condition,
-      remarks: input.remarks || null,
-    });
-    if (returnError) throw returnError;
-    const { error: closeAssignmentError } = await supabase
-      .from("assignments")
-      .update({ status: "Returned" })
-      .eq("asset_id", assetUuid)
-      .eq("employee_id", input.employeeUuid)
-      .eq("status", "Active");
-    if (closeAssignmentError) throw closeAssignmentError;
+export async function returnTransferredAssetToStock(input: {
+  assetTag: string;
+  employeeUuid: string;
+  returnDate: string;
+  receivedBy: string;
+}) {
+  if (!supabaseConfig.isConfigured) {
+    throw new Error("Supabase is not configured.");
+  }
+  if (!input.assetTag || !input.employeeUuid) {
+    throw new Error("The asset and its current employee are required.");
+  }
+
+  const { error } = await supabase.rpc("return_transferred_asset_to_stock", {
+    p_asset_tag: input.assetTag,
+    p_employee_uuid: input.employeeUuid,
+    p_return_date: new Date(`${input.returnDate}T00:00:00`).toISOString(),
+    p_received_by: input.receivedBy,
+  });
+
+  if (error) {
+    console.error("returnTransferredAssetToStock:", error);
+    if (error.code === "PGRST202" || error.code === "42883") {
+      throw new Error(
+        "The database stock-return transaction is not installed. Run supabase/fix_handover_returns.sql in the Supabase SQL Editor, then retry.",
+      );
+    }
+    throw error;
+  }
+}
+
+export async function sendAssetForRepair(input: {
+  assetTag: string;
+  employeeUuid: string;
+  vendorName: "Dell" | "Poly";
+  issue: string;
+  reportedDate: string;
+  temporaryAssetTag?: string;
+}) {
+  if (!supabaseConfig.isConfigured) {
+    throw new Error("Supabase is not configured.");
+  }
+  if (!input.assetTag || !input.employeeUuid) {
+    throw new Error("The assigned asset and employee are required.");
+  }
+  if (!input.issue.trim()) {
+    throw new Error("Enter an issue description before sending the asset for repair.");
+  }
+
+  const { error } = await supabase.rpc("send_asset_for_repair", {
+    p_asset_tag: input.assetTag,
+    p_employee_uuid: input.employeeUuid,
+    p_vendor_name: input.vendorName,
+    p_issue_summary: input.issue.trim(),
+    p_reported_date: new Date(`${input.reportedDate}T00:00:00`).toISOString(),
+    p_temporary_asset_tag: input.temporaryAssetTag ?? null,
+  });
+
+  if (error) {
+    console.error("sendAssetForRepair:", error);
+    if (error.code === "PGRST202" || error.code === "42883") {
+      throw new Error(
+        "The database repair workflow is not installed. Run supabase/fix_asset_repair.sql in the Supabase SQL Editor, then retry.",
+      );
+    }
+    throw error;
   }
 }
 
@@ -592,6 +839,50 @@ export interface RecentAssetActivity {
   action: string;
   employeeName: string;
   date: string;
+}
+
+export interface PendingAssetRepair {
+  id: string;
+  assetId: string;
+  assetName: string;
+  issue: string;
+  status: string;
+  reportedDate: string;
+}
+
+export async function fetchPendingRepairsFromSupabase(): Promise<
+  PendingAssetRepair[]
+> {
+  if (!supabaseConfig.isConfigured) return [];
+
+  const [{ data: repairRows, error }, assets] = await Promise.all([
+    supabase
+      .from("repair_requests")
+      .select("id, asset_id, issue_summary, status, reported_date")
+      .in("status", ["Pending", "Sent to Vendor", "Under Repair"])
+      .order("reported_date", { ascending: false }),
+    fetchAssetsFromSupabase(),
+  ]);
+
+  if (error) {
+    console.error("fetchPendingRepairsFromSupabase:", error);
+    throw error;
+  }
+
+  const assetsByUuid = new Map(
+    assets.map((asset) => [asset._uuid, asset]),
+  );
+  return (repairRows ?? []).map((row) => {
+    const asset = assetsByUuid.get(row.asset_id);
+    return {
+      id: row.id,
+      assetId: asset?.id ?? row.asset_id,
+      assetName: asset?.name ?? "Asset",
+      issue: row.issue_summary,
+      status: row.status,
+      reportedDate: formatDateDMY(row.reported_date),
+    };
+  });
 }
 
 export async function fetchRecentAssetActivityFromSupabase(
@@ -622,13 +913,16 @@ export async function fetchRecentAssetActivityFromSupabase(
     ]);
 
   if (assignmentResult.error) {
-    console.warn("Could not load assignment activity:", assignmentResult.error.message);
+    console.error("Could not load assignment activity:", assignmentResult.error);
+    throw assignmentResult.error;
   }
   if (transferResult.error) {
-    console.warn("Could not load transfer activity:", transferResult.error.message);
+    console.error("Could not load transfer activity:", transferResult.error);
+    throw transferResult.error;
   }
   if (returnResult.error) {
-    console.warn("Could not load return activity:", returnResult.error.message);
+    console.error("Could not load return activity:", returnResult.error);
+    throw returnResult.error;
   }
 
   const assetsByUuid = new Map(assets.map((asset) => [asset._uuid, asset]));
@@ -722,7 +1016,11 @@ export async function fetchRecentAssetActivityFromSupabase(
 export async function fetchTransferRecordsFromSupabase(): Promise<Transfer[]> {
   if (!supabaseConfig.isConfigured) return [];
   const [{ data: rows, error }, assets, employees] = await Promise.all([
-    supabase.from("transfers").select("*").order("transfer_date", { ascending: false }),
+    supabase
+      .from("transfers")
+      .select("*")
+      .order("transfer_date", { ascending: false })
+      .order("created_at", { ascending: false }),
     fetchAssetsFromSupabase(),
     fetchEmployeesFromSupabase(),
   ]);
@@ -730,12 +1028,19 @@ export async function fetchTransferRecordsFromSupabase(): Promise<Transfer[]> {
 
   const assetsByUuid = new Map(assets.map((asset) => [asset._uuid, asset]));
   const employeesByUuid = new Map(employees.map((employee) => [employee._uuid, employee]));
+  const latestTransferByAsset = new Map<string, string>();
+  (rows ?? []).forEach((row) => {
+    if (!latestTransferByAsset.has(row.asset_id)) {
+      latestTransferByAsset.set(row.asset_id, row.id);
+    }
+  });
   return (rows ?? []).map((row) => {
     const asset = assetsByUuid.get(row.asset_id);
     const from = employeesByUuid.get(row.from_employee_id);
     const to = employeesByUuid.get(row.to_employee_id);
     return {
       id: row.id,
+      serialNumber: `TR-${String(row.serial_number).padStart(6, "0")}`,
       assetId: asset?.id ?? row.asset_id,
       assetName: asset?.name ?? "Asset",
       fromEmployeeId: from?.empId ?? from?.id ?? "-",
@@ -747,6 +1052,13 @@ export async function fetchTransferRecordsFromSupabase(): Promise<Transfer[]> {
       transferDate: formatDateDMY(row.transfer_date),
       reason: row.reason ?? "-",
       status: row.status === "Pending" ? "Pending" : "Completed",
+      assetTag: asset?.id,
+      currentEmployeeUuid: to?._uuid,
+      canReturnToStock:
+        latestTransferByAsset.get(row.asset_id) === row.id &&
+        row.status !== "Pending" &&
+        asset?.status === "Assigned" &&
+        asset.assignedToEmployeeUuid === row.to_employee_id,
     } satisfies Transfer;
   });
 }

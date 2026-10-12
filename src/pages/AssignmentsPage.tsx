@@ -1,5 +1,5 @@
-import { useState, useMemo } from "react";
-import { UserCheck, Download, Eye, FileText } from "lucide-react";
+import { useState, useMemo, useEffect } from "react";
+import { UserCheck, Download, Eye } from "lucide-react";
 import { PageHeader } from "@/components/shared/PageHeader";
 import { Card, StatCard } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
@@ -9,21 +9,69 @@ import { ConditionBadge } from "@/components/ui/StatusBadges";
 import { Pagination } from "@/components/ui/Pagination";
 import { useToast } from "@/components/ui/Toast";
 import { getInitials } from "@/lib/utils";
-
-const assignments: any[] = [];
-const DEPARTMENTS: string[] = [];
+import { fetchActiveAssignmentsFromSupabase } from "@/lib/supabaseData";
+import { supabaseConfig } from "@/lib/supabase";
+import type { Assignment } from "@/types";
 
 const ITEMS_PER_PAGE = 12;
 
 export function AssignmentsPage({
   onAssetSelect,
+  refreshVersion = 0,
 }: {
   onAssetSelect: (id: string) => void;
+  refreshVersion?: number;
 }) {
   const { showToast } = useToast();
+  const [assignments, setAssignments] = useState<Assignment[]>([]);
+  const [isLoading, setIsLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [search, setSearch] = useState("");
   const [deptFilter, setDeptFilter] = useState("");
   const [page, setPage] = useState(1);
+
+  useEffect(() => {
+    let active = true;
+    setIsLoading(true);
+    setLoadError(null);
+
+    if (!supabaseConfig.isConfigured) {
+      setAssignments([]);
+      setLoadError(
+        "Supabase is not configured. Assignment data cannot be loaded.",
+      );
+      setIsLoading(false);
+      return () => {
+        active = false;
+      };
+    }
+
+    fetchActiveAssignmentsFromSupabase()
+      .then((rows) => {
+        if (active) setAssignments(rows);
+      })
+      .catch((error) => {
+        console.error("Could not load active assignments:", error);
+        if (active) {
+          setAssignments([]);
+          setLoadError("Could not load assignments from the database.");
+          showToast("Could not load assignments from the database.", "error");
+        }
+      })
+      .finally(() => {
+        if (active) setIsLoading(false);
+      });
+
+    return () => {
+      active = false;
+    };
+  }, [refreshVersion, showToast]);
+
+  const departments = useMemo(
+    () =>
+      [...new Set(assignments.map((assignment) => assignment.department))].sort(),
+    [assignments],
+  );
 
   const filtered = useMemo(() => {
     return assignments.filter((a) => {
@@ -37,8 +85,11 @@ export function AssignmentsPage({
       const matchesDept = !deptFilter || a.department === deptFilter;
       return matchesSearch && matchesDept;
     });
-  }, [search, deptFilter]);
+  }, [assignments, search, deptFilter]);
 
+  const employeeCount = new Set(
+    assignments.map((assignment) => assignment.employeeId),
+  ).size;
   const totalPages = Math.ceil(filtered.length / ITEMS_PER_PAGE);
   const pageData = filtered.slice(
     (page - 1) * ITEMS_PER_PAGE,
@@ -49,7 +100,7 @@ export function AssignmentsPage({
     <div className="space-y-6 text-slate-100">
       <PageHeader
         title="Asset Assignments"
-        subtitle={`${assignments.length} active hardware assignments recorded`}
+        subtitle={`${assignments.length} assets currently assigned from the database`}
         actions={
           <Button
             variant="outline"
@@ -63,7 +114,7 @@ export function AssignmentsPage({
 
       <div className="grid grid-cols-2 gap-4 lg:grid-cols-3">
         <StatCard
-          label="Total Assignments"
+          label="Assigned Assets"
           value={assignments.length}
           icon={<UserCheck className="h-6 w-6" />}
           iconBg="bg-blue-900/50"
@@ -77,11 +128,11 @@ export function AssignmentsPage({
           iconColor="text-emerald-400"
         />
         <StatCard
-          label="Returned"
-          value={assignments.filter((a) => a.status === "Returned").length}
+          label="Employees with Assets"
+          value={employeeCount}
           icon={<UserCheck className="h-6 w-6" />}
-          iconBg="bg-amber-900/50"
-          iconColor="text-amber-400"
+          iconBg="bg-cyan-900/50"
+          iconColor="text-cyan-400"
         />
       </div>
 
@@ -102,7 +153,7 @@ export function AssignmentsPage({
               setDeptFilter(v);
               setPage(1);
             }}
-            options={DEPARTMENTS.map((d) => ({ label: d, value: d }))}
+            options={departments.map((d) => ({ label: d, value: d }))}
             placeholder="All Departments"
           />
         </div>
@@ -124,10 +175,22 @@ export function AssignmentsPage({
             </TR>
           </THead>
           <TBody>
-            {pageData.length === 0 ? (
+            {isLoading ? (
+              <TR>
+                <TD colSpan={9} className="py-12 text-center text-slate-400">
+                  Loading current assignments...
+                </TD>
+              </TR>
+            ) : loadError ? (
+              <TR>
+                <TD colSpan={9} className="py-12 text-center text-red-300">
+                  {loadError}
+                </TD>
+              </TR>
+            ) : pageData.length === 0 ? (
               <TR>
                 <TD colSpan={9} className="text-center py-12 text-slate-400">
-                  No assignments found.
+                  No currently assigned assets found.
                 </TD>
               </TR>
             ) : (

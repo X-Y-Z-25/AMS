@@ -7,6 +7,7 @@ import {
   CircleUser,
   Laptop,
   Settings,
+  LogOut,
 } from "lucide-react";
 import {
   fetchAssetsFromSupabase,
@@ -15,11 +16,14 @@ import {
 import { getInitials, classNames } from "@/lib/utils";
 import type { PageKey } from "./Sidebar";
 import type { Asset, Employee } from "@/types";
+import type { AppUserProfile } from "@/lib/auth";
 
 interface HeaderProps {
   onNavigate: (page: PageKey) => void;
   onAssetSelect: (assetId: string) => void;
   onEmployeeSelect: (employeeId: string) => void;
+  profile: AppUserProfile;
+  onSignOut: () => void | Promise<void>;
 }
 
 interface SearchResult {
@@ -43,6 +47,8 @@ export function Header({
   onNavigate,
   onAssetSelect,
   onEmployeeSelect,
+  profile,
+  onSignOut,
 }: HeaderProps) {
   const [searchQuery, setSearchQuery] = useState("");
   const [searchResults, setSearchResults] = useState<SearchResult[]>([]);
@@ -308,19 +314,19 @@ export function Header({
             className="flex h-10 items-center gap-2 rounded-xl pl-1 pr-2 hover:bg-slate-700/50 transition-all"
           >
             <div className="flex h-8 w-8 items-center justify-center rounded-xl bg-gradient-to-br from-blue-500 to-blue-700 text-white text-xs font-bold shadow-lg">
-              IT
+              {getInitials(profile.username)}
             </div>
             <div className="hidden md:block text-left">
-              <p className="text-sm font-medium text-slate-100">IT Admin</p>
-              <p className="text-xs text-slate-500">Administrator</p>
+              <p className="text-sm font-medium text-slate-100">{profile.username}</p>
+              <p className="text-xs text-slate-500">{profile.gmail}</p>
             </div>
             <ChevronDown className="hidden md:block h-4 w-4 text-slate-500" />
           </button>
           {showUserMenu && (
             <div className="absolute right-0 top-full mt-2 w-56 rounded-xl border border-slate-700/60 bg-slate-800 shadow-2xl shadow-black/50 z-50 animate-slide-up overflow-hidden">
               <div className="border-b border-slate-700/60 px-4 py-3">
-                <p className="text-sm font-semibold text-white">IT Admin</p>
-                <p className="text-xs text-slate-500">admin@company.in</p>
+                <p className="text-sm font-semibold text-white">{profile.username}</p>
+                <p className="text-xs text-slate-500">{profile.gmail}</p>
               </div>
               <ul className="py-1.5">
                 <li>
@@ -337,6 +343,17 @@ export function Header({
                     className="flex w-full items-center gap-3 px-4 py-2 text-sm text-slate-400 hover:bg-slate-700/50 hover:text-slate-100 transition-colors"
                   >
                     <Settings className="h-4 w-4" /> Settings
+                  </button>
+                </li>
+                <li>
+                  <button
+                    onClick={() => {
+                      setShowUserMenu(false);
+                      void onSignOut();
+                    }}
+                    className="flex w-full items-center gap-3 px-4 py-2 text-sm text-slate-400 hover:bg-slate-700/50 hover:text-slate-100 transition-colors"
+                  >
+                    <LogOut className="h-4 w-4" /> Sign out
                   </button>
                 </li>
               </ul>

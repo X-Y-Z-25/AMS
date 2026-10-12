@@ -1,23 +1,34 @@
 import { useEffect, useState } from "react";
-import { ArrowLeftRight, Download } from "lucide-react";
+import { ArrowLeftRight, Download, PackageCheck } from "lucide-react";
 import { PageHeader } from "@/components/shared/PageHeader";
 import { Card, StatCard } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
 import { Table, THead, TBody, TR, TH, TD } from "@/components/ui/Table";
 import { useToast } from "@/components/ui/Toast";
-import { fetchTransferRecordsFromSupabase } from "@/lib/supabaseData";
+import {
+  fetchTransferRecordsFromSupabase,
+  returnTransferredAssetToStock,
+} from "@/lib/supabaseData";
 import type { Transfer } from "@/types";
+import type { AppUserProfile } from "@/lib/auth";
 
 export function TransfersPage({
   onAssetSelect,
+  onComplete,
   refreshVersion = 0,
+  profile,
 }: {
   onAssetSelect: (id: string) => void;
+  onComplete: () => void;
   refreshVersion?: number;
+  profile: AppUserProfile;
 }) {
   const { showToast } = useToast();
   const [transfers, setTransfers] = useState<Transfer[]>([]);
   const [isLoading, setIsLoading] = useState(true);
+  const [returningTransferId, setReturningTransferId] = useState<string | null>(
+    null,
+  );
 
   useEffect(() => {
     let active = true;
@@ -38,6 +49,41 @@ export function TransfersPage({
   }, [refreshVersion, showToast]);
 
   const completed = transfers.filter((t) => t.status === "Completed").length;
+
+  const handleReturnToStock = async (transfer: Transfer) => {
+    if (
+      !transfer.canReturnToStock ||
+      !transfer.assetTag ||
+      !transfer.currentEmployeeUuid ||
+      returningTransferId
+    ) {
+      return;
+    }
+
+    setReturningTransferId(transfer.id);
+    try {
+      await returnTransferredAssetToStock({
+        assetTag: transfer.assetTag,
+        employeeUuid: transfer.currentEmployeeUuid,
+        returnDate: new Date().toISOString().slice(0, 10),
+        receivedBy: profile.username,
+      });
+      const rows = await fetchTransferRecordsFromSupabase();
+      setTransfers(rows);
+      showToast(`${transfer.assetId} returned to stock.`, "success");
+      onComplete();
+    } catch (error) {
+      console.error("Could not return transferred asset to stock:", error);
+      showToast(
+        error instanceof Error
+          ? error.message
+          : "Could not return the asset to stock.",
+        "error",
+      );
+    } finally {
+      setReturningTransferId(null);
+    }
+  };
 
   return (
     <div className="space-y-6 text-slate-100">
@@ -83,7 +129,7 @@ export function TransfersPage({
         <Table>
           <THead>
             <TR className="border-b border-slate-700 bg-slate-900/60">
-              <TH>Transfer ID</TH>
+              <TH>Serial Number</TH>
               <TH>Asset</TH>
               <TH>From Employee</TH>
               <TH>From Location</TH>
@@ -92,18 +138,19 @@ export function TransfersPage({
               <TH>Date</TH>
               <TH>Reason</TH>
               <TH>Status</TH>
+              <TH className="text-right">Action</TH>
             </TR>
           </THead>
           <TBody>
             {isLoading ? (
               <TR>
-                <TD colSpan={9} className="py-10 text-center text-slate-400">
+                <TD colSpan={10} className="py-10 text-center text-slate-400">
                   Loading transfers...
                 </TD>
               </TR>
             ) : transfers.length === 0 ? (
               <TR>
-                <TD colSpan={9} className="py-10 text-center text-slate-400">
+                <TD colSpan={10} className="py-10 text-center text-slate-400">
                   No transfers recorded.
                 </TD>
               </TR>
@@ -114,7 +161,7 @@ export function TransfersPage({
                 className="hover:bg-slate-700/40 border-b border-slate-700/50 cursor-pointer"
               >
                 <TD className="font-mono text-xs font-bold text-blue-400">
-                  {t.id}
+                  {t.serialNumber}
                 </TD>
                 <TD>
                   <p className="font-semibold text-slate-100">{t.assetName}</p>
@@ -148,6 +195,27 @@ export function TransfersPage({
                   <span className="inline-flex items-center rounded-md px-2.5 py-0.5 text-xs font-bold bg-emerald-950/60 text-emerald-300 border border-emerald-800/60">
                     {t.status}
                   </span>
+                </TD>
+                <TD className="text-right">
+                  {t.canReturnToStock ? (
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      icon={<PackageCheck className="h-4 w-4" />}
+                      loading={returningTransferId === t.id}
+                      disabled={returningTransferId !== null}
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        void handleReturnToStock(t);
+                      }}
+                    >
+                      {returningTransferId === t.id
+                        ? "Returning..."
+                        : "Return to Stock"}
+                    </Button>
+                  ) : (
+                    <span className="text-xs text-slate-500">—</span>
+                  )}
                 </TD>
               </TR>
             ))}

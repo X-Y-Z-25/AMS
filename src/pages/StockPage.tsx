@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type ChangeEvent } from "react";
-import { Package, Plus, Upload, Download, ShieldCheck } from "lucide-react";
+import { Package, Plus, Upload, Download } from "lucide-react";
 import * as XLSX from "xlsx";
 import { PageHeader } from "@/components/shared/PageHeader";
 import { Card, StatCard } from "@/components/ui/Card";
@@ -8,7 +8,6 @@ import { SearchInput, Select, TextInput } from "@/components/ui/Form";
 import { Modal } from "@/components/ui/Modal";
 import { Field } from "@/components/ui/Form";
 import { useToast } from "@/components/ui/Toast";
-import { hasDellCredentials, lookupWarranty } from "@/lib/dellApi";
 import { supabase, supabaseConfig } from "@/lib/supabase";
 import { fetchAssetsFromSupabase } from "@/lib/supabaseData";
 import type { Asset } from "@/types";
@@ -150,16 +149,21 @@ function mapStockCategoryToDb(
 }
 
 function getBatteryLabel(asset: Asset): WarrantyInfo {
-  const end =
-    asset.warrantyEnd && asset.warrantyEnd !== "N/A"
+  const dmy = asset.warrantyEnd.match(/^(\d{1,2})[-/](\d{1,2})[-/](\d{4})$/);
+  const end = dmy
+    ? new Date(Number(dmy[3]), Number(dmy[2]) - 1, Number(dmy[1]))
+    : asset.warrantyEnd && asset.warrantyEnd !== "N/A"
       ? new Date(asset.warrantyEnd)
       : null;
   if (!end || Number.isNaN(end.getTime())) {
     return { label: "—", tone: "neutral" };
   }
 
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  end.setHours(0, 0, 0, 0);
   const daysLeft = Math.ceil(
-    (end.getTime() - Date.now()) / (1000 * 60 * 60 * 24),
+    (end.getTime() - today.getTime()) / (1000 * 60 * 60 * 24),
   );
   if (daysLeft <= 0) return { label: "Expired", tone: "danger" };
   if (daysLeft <= 90)
@@ -246,9 +250,13 @@ export function StockPage() {
   const [showBulkModal, setShowBulkModal] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
   const [stockAssets, setStockAssets] = useState<Asset[]>([]);
-  const [dellWarrantyMap, setDellWarrantyMap] = useState<
-    Record<string, WarrantyInfo>
-  >({});
+  const dellWarrantyMap = useMemo(() => {
+    const warrantyByTag: Record<string, WarrantyInfo> = {};
+    for (const asset of stockAssets) {
+      if (asset.serviceTag) warrantyByTag[asset.serviceTag] = getBatteryLabel(asset);
+    }
+    return warrantyByTag;
+  }, [stockAssets]);
   const [addStockForm, setAddStockForm] = useState({
     category: "Keyboard",
     model: "Dell KB216",
@@ -276,65 +284,6 @@ export function StockPage() {
   useEffect(() => {
     void refreshStock();
   }, []);
-
-  useEffect(() => {
-    const serviceTags = [
-      ...new Set(
-        stockAssets
-          .filter((item) => item.serviceTag)
-          .map((item) => item.serviceTag),
-      ),
-    ];
-    if (!serviceTags.length) {
-      setDellWarrantyMap({});
-      return;
-    }
-
-    const fallbackMap: Record<string, WarrantyInfo> = {};
-    for (const item of stockAssets) {
-      if (item.serviceTag) fallbackMap[item.serviceTag] = getBatteryLabel(item);
-    }
-
-    let active = true;
-
-    const load = async () => {
-      if (!hasDellCredentials()) {
-        if (active) setDellWarrantyMap(fallbackMap);
-        return;
-      }
-
-      try {
-        const results = await lookupWarranty(serviceTags);
-        const nextMap: Record<string, WarrantyInfo> = { ...fallbackMap };
-
-        for (const item of results) {
-          if (!item.serviceTag) continue;
-          const daysLeft = item.daysUntilExpiry;
-          if (daysLeft === null) {
-            nextMap[item.serviceTag] = nextMap[item.serviceTag] || {
-              label: "—",
-              tone: "neutral",
-            };
-            continue;
-          }
-
-          const label = daysLeft <= 0 ? "Expired" : `${daysLeft} days left`;
-          const tone =
-            daysLeft <= 0 ? "danger" : daysLeft <= 90 ? "warning" : "good";
-          nextMap[item.serviceTag] = { label, tone };
-        }
-
-        if (active) setDellWarrantyMap(nextMap);
-      } catch {
-        if (active) setDellWarrantyMap(fallbackMap);
-      }
-    };
-
-    void load();
-    return () => {
-      active = false;
-    };
-  }, [stockAssets]);
 
   const groupedStock = useMemo<StockSummaryRow[]>(() => {
     const groups = new Map<string, StockSummaryRow>();
@@ -781,12 +730,6 @@ export function StockPage() {
               {filtered.length} stock group(s) shown
             </p>
           </div>
-          {hasDellCredentials() && (
-            <div className="inline-flex items-center gap-2 rounded-full border border-emerald-500/30 bg-emerald-900/20 px-2.5 py-1 text-[11px] text-emerald-300">
-              <ShieldCheck className="h-3.5 w-3.5" />
-              Dell warranty sync active
-            </div>
-          )}
         </div>
 
         {isLoading ? (
